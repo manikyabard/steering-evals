@@ -12,6 +12,11 @@
 #
 # By the end of this notebook, you'll have a visualization showing how steering strength
 # affects both reasoning length and accuracy on math problems.
+#
+# This implementation follows best practices for Qwen models:
+# - Using appropriate sampling parameters (Temperature=0.6, TopP=0.95, TopK=20)
+# - Including step-by-step reasoning instructions
+# - Using adequate output length
 
 # %% [markdown]
 # ## Setup
@@ -86,8 +91,26 @@ def parse_args():
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=1024,
+        default=32768,  # Recommended for Qwen models
         help="Maximum number of tokens to generate",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.6,  # Recommended for thinking mode
+        help="Temperature for sampling",
+    )
+    parser.add_argument(
+        "--top_p",
+        type=float,
+        default=0.95,  # Recommended for thinking mode
+        help="Top-p (nucleus) sampling parameter",
+    )
+    parser.add_argument(
+        "--top_k",
+        type=float,
+        default=20,  # Recommended for thinking mode
+        help="Top-k sampling parameter",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     return parser.parse_args()
@@ -109,7 +132,10 @@ class NotebookArgs:
         self.num_samples = 3  # Use a small number for quick testing
         self.direction_weights = [-0.08, 0.0, 0.08]  # Alpha values to test
         self.component = "attn"  # Component to steer (attn, mlp, or both)
-        self.max_new_tokens = 1024  # Maximum new tokens to generate
+        self.max_new_tokens = 32768  # Recommended for Qwen models
+        self.temperature = 0.6  # Recommended for thinking mode
+        self.top_p = 0.95  # Recommended for thinking mode
+        self.top_k = 20  # Recommended for thinking mode
         self.seed = 42  # Random seed for reproducibility
 
 
@@ -123,6 +149,9 @@ if "ipykernel" in sys.modules:
     print(f"- Component to steer: {args.component}")
     print(f"- Direction weights (alpha): {args.direction_weights}")
     print(f"- Number of samples: {args.num_samples}")
+    print(f"- Temperature: {args.temperature}")
+    print(f"- Top-p: {args.top_p}")
+    print(f"- Top-k: {args.top_k}")
 else:
     args = parse_args()
     print("Running in script mode with parsed arguments")
@@ -309,19 +338,19 @@ def generate_with_steering(
     alpha=0.0,
     directions=None,
     component="attn",
-    max_new_tokens=1024,
+    max_new_tokens=32768,
+    temperature=0.6,
+    top_p=0.95,
+    top_k=20,
 ):
     """Generate a response with steering applied."""
     if directions is None:
         raise ValueError("Directions must be provided for steering")
 
-    # Create the prompt
-    messages = [
-        {
-            "role": "user",
-            "content": f"Solve this math problem step by step:\n{question}",
-        }
-    ]
+    # Create the prompt with step-by-step reasoning instruction
+    prompt = f"Solve this math problem step by step, and put your final answer within \\boxed{{}}:\n{question}"
+
+    messages = [{"role": "user", "content": prompt}]
     text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
@@ -339,7 +368,10 @@ def generate_with_steering(
         generated_ids = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            do_sample=False,  # Use greedy decoding for deterministic outputs
+            do_sample=True,  # Use sampling as recommended
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
         )
 
     # Remove steering layers
@@ -357,9 +389,13 @@ def generate_with_steering(
         )
 
         if think_end_index != -1:
+            # Check if <think> tag is present at the beginning and remove it
             thinking_content = tokenizer.decode(
                 output_ids[:think_end_index], skip_special_tokens=True
             ).strip()
+            if thinking_content.startswith("<think>"):
+                thinking_content = thinking_content[len("<think>") :].strip()
+
             content = tokenizer.decode(
                 output_ids[think_end_index + 1 :], skip_special_tokens=True
             ).strip()
@@ -408,6 +444,9 @@ try:
             alpha=0.08,
             directions=directions,
             component=args.component,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
         )
 
         # Generate with zero alpha (neutral)
@@ -419,6 +458,9 @@ try:
             alpha=0.0,
             directions=directions,
             component=args.component,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
         )
 
         # Generate with negative alpha (encouraging shorter reasoning)
@@ -430,6 +472,9 @@ try:
             alpha=-0.08,
             directions=directions,
             component=args.component,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
         )
 
         # Print statistics
@@ -486,6 +531,16 @@ def is_correct(response, answer):
 
     # Check if this answer appears in the response
     full_response = response["thinking"] + " " + response["response"]
+
+    # Look for boxed answers in the response
+    if "\\boxed{" in full_response:
+        try:
+            boxed_content = full_response.split("\\boxed{")[1].split("}")[0].strip()
+            return expected_answer in boxed_content
+        except:
+            pass
+
+    # Fallback to simple answer check
     return expected_answer in full_response
 
 
@@ -677,6 +732,9 @@ def main(args):
                 directions=directions,
                 component=args.component,
                 max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                top_k=args.top_k,
             )
 
             # Calculate metrics
@@ -747,6 +805,17 @@ if __name__ == "__main__" or "ipykernel" in sys.modules:
             print(f"- Thinking length: {r['thinking_words']} words")
             print(f"- Correct: {r['is_correct']}")
             print(f"- Thinking excerpt: {r['response']['thinking'][:150]}...")
+
+            # Check if there's a boxed answer
+            full_response = r["response"]["thinking"] + " " + r["response"]["response"]
+            if "\\boxed{" in full_response:
+                try:
+                    boxed_content = (
+                        full_response.split("\\boxed{")[1].split("}")[0].strip()
+                    )
+                    print(f"- Boxed answer: {boxed_content}")
+                except:
+                    pass
 
 # %% [markdown]
 # ## Analysis and Conclusion

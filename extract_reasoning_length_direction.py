@@ -2,15 +2,16 @@
 # # Extracting Reasoning Length Direction
 #
 # This notebook identifies and extracts the reasoning length direction from self-attention and MLP layers
-# based on paired responses (with and without thinking) generated from the GSM8K dataset.
+# based on responses generated from the GSM8K dataset.
 #
 # We use the Contrastive Activation Addition (CAA) technique to identify direction vectors
-# that control reasoning length. The extracted directions can later be used to steer the model's reasoning.
+# that control reasoning length by comparing activations from long thinking vs short thinking examples.
+# The extracted directions can later be used to steer the model's reasoning.
 #
 # Workflow:
-# 1. Load paired responses from the previous notebook
+# 1. Load responses with thinking from the previous notebook
 # 2. Extract activations from model layers using hooks
-# 3. Compute direction vectors using CAA
+# 3. Compute direction vectors by contrasting long vs. short thinking examples
 # 4. Save and visualize the extracted directions
 
 # %% [markdown]
@@ -135,10 +136,10 @@ if os.path.exists(responses_file):
         print("-" * 50)
         print(f"Question: {responses[0]['question']}")
         print(
-            f"With thinking (first 100 chars): {responses[0]['with_thinking']['thinking'][:100]}..."
+            f"Thinking (first 100 chars): {responses[0]['with_thinking']['thinking'][:100]}..."
         )
         print(
-            f"Without thinking (first 100 chars): {responses[0]['without_thinking']['response'][:100]}..."
+            f"Response (first 100 chars): {responses[0]['with_thinking']['response'][:100]}..."
         )
 else:
     print(f"Responses file not found: {responses_file}")
@@ -285,6 +286,7 @@ except Exception as e:
 # ## Functions to Extract Reasoning Length Direction
 #
 # Now we'll define the functions to extract activations and compute the reasoning length direction.
+# We'll compare examples with long thinking vs short thinking to derive the direction vector.
 
 
 # %%
@@ -308,76 +310,114 @@ def get_activations_for_text(model, tokenizer, activation_extractor, text):
 def compute_reasoning_length_direction(
     model, tokenizer, response_data, activation_extractor, num_samples=50
 ):
-    """Compute the reasoning length direction using contrastive activation addition."""
-    directions = defaultdict(list)
+    """Compute the reasoning length direction by comparing long thinking vs. short thinking examples."""
+    # Filter examples based on thinking length
+    valid_responses = [
+        ex
+        for ex in response_data
+        if "thinking" in ex["with_thinking"] and ex["with_thinking"]["thinking"]
+    ]
+
+    # Calculate thinking length for each example
+    for ex in valid_responses:
+        ex["thinking_length"] = len(ex["with_thinking"]["thinking"])
+
+    # Sort by thinking length
+    valid_responses.sort(key=lambda x: x["thinking_length"])
+
+    # Select short thinking examples (bottom 20%)
+    short_thinking_count = max(5, int(len(valid_responses) * 0.2))
+    short_thinking_examples = valid_responses[:short_thinking_count]
+
+    # Select long thinking examples (top 20%)
+    long_thinking_count = max(5, int(len(valid_responses) * 0.2))
+    long_thinking_examples = valid_responses[-long_thinking_count:]
+
+    print(f"Using {len(long_thinking_examples)} long thinking examples")
+    print(f"Using {len(short_thinking_examples)} short thinking examples")
 
     # Limit the number of samples to process
-    samples_to_process = min(len(response_data), num_samples)
+    long_examples_to_process = min(len(long_thinking_examples), num_samples // 2)
+    short_examples_to_process = min(len(short_thinking_examples), num_samples // 2)
 
-    # Track progress and statistics
-    successful_pairs = 0
-    skipped_pairs = 0
+    # Storage for activations
+    long_thinking_activations = defaultdict(list)
+    short_thinking_activations = defaultdict(list)
 
-    for idx in tqdm(range(samples_to_process), desc="Computing directions"):
-        item = response_data[idx]
+    # Process long thinking examples
+    for idx in tqdm(
+        range(long_examples_to_process), desc="Processing long thinking examples"
+    ):
+        item = long_thinking_examples[idx]
         question = item["question"]
-        with_thinking = item["with_thinking"]
-        without_thinking = item["without_thinking"]
+        thinking = item["with_thinking"]["thinking"]
 
-        # Skip if thinking content is empty
-        if not with_thinking["thinking"]:
-            skipped_pairs += 1
-            continue
+        # Create prompt for thinking content
+        prompt = f"Solve this math problem step by step, and put your final answer within \\boxed{{}}:\n{question}\n{thinking}"
 
-        # Create prompts
-        thinking_prompt = f"Solve this math problem step by step:\n{question}"
-        non_thinking_prompt = thinking_prompt
-
-        # Get activations for thinking and non-thinking prompts
-        thinking_activations = get_activations_for_text(
-            model, tokenizer, activation_extractor, thinking_prompt
+        # Get activations
+        activations = get_activations_for_text(
+            model, tokenizer, activation_extractor, prompt
         )
 
-        non_thinking_activations = get_activations_for_text(
-            model, tokenizer, activation_extractor, non_thinking_prompt
+        # Store activations for each layer
+        for layer_name, layer_activation in activations.items():
+            long_thinking_activations[layer_name].append(layer_activation)
+
+    # Process short thinking examples
+    for idx in tqdm(
+        range(short_examples_to_process), desc="Processing short thinking examples"
+    ):
+        item = short_thinking_examples[idx]
+        question = item["question"]
+        thinking = item["with_thinking"]["thinking"]
+
+        # Create prompt for thinking content
+        prompt = f"Solve this math problem step by step, and put your final answer within \\boxed{{}}:\n{question}\n{thinking}"
+
+        # Get activations
+        activations = get_activations_for_text(
+            model, tokenizer, activation_extractor, prompt
         )
 
-        # Compute difference vectors for each layer
-        for layer_name in thinking_activations:
-            # Check dimensions match
-            if (
-                thinking_activations[layer_name].shape
-                == non_thinking_activations[layer_name].shape
-            ):
-                # Calculate the direction vector (thinking - non_thinking)
-                diff = (
-                    thinking_activations[layer_name]
-                    - non_thinking_activations[layer_name]
-                )
-                directions[layer_name].append(diff)
+        # Store activations for each layer
+        for layer_name, layer_activation in activations.items():
+            short_thinking_activations[layer_name].append(layer_activation)
 
-        successful_pairs += 1
+    # Calculate mean activations for long and short thinking examples
+    long_mean_activations = {}
+    short_mean_activations = {}
 
-    # Print statistics
-    print(f"Processed {successful_pairs} valid pairs, skipped {skipped_pairs} pairs")
-    print(f"Found directions for {len(directions)} layers")
+    for layer_name in long_thinking_activations:
+        if layer_name in short_thinking_activations:
+            # Stack and mean for long thinking examples
+            if long_thinking_activations[layer_name]:
+                stacked_long = torch.stack(long_thinking_activations[layer_name])
+                long_mean_activations[layer_name] = torch.mean(stacked_long, dim=0)
 
-    # Average the directions for each layer
-    avg_directions = {}
-    for layer_name, diff_list in directions.items():
-        if diff_list:  # Check if there are any valid differences
-            # Stack and average
-            stacked_diffs = torch.stack(diff_list)
-            avg_diff = torch.mean(stacked_diffs, dim=0)
+            # Stack and mean for short thinking examples
+            if short_thinking_activations[layer_name]:
+                stacked_short = torch.stack(short_thinking_activations[layer_name])
+                short_mean_activations[layer_name] = torch.mean(stacked_short, dim=0)
+
+    # Compute direction as long - short
+    directions = {}
+    for layer_name in long_mean_activations:
+        if layer_name in short_mean_activations:
+            # Calculate the direction vector (long - short)
+            diff = (
+                long_mean_activations[layer_name] - short_mean_activations[layer_name]
+            )
 
             # Normalize the direction vector
-            norm = torch.norm(avg_diff)
+            norm = torch.norm(diff)
             if norm > 0:
-                avg_directions[layer_name] = avg_diff / norm
+                directions[layer_name] = diff / norm
             else:
-                avg_directions[layer_name] = avg_diff
+                directions[layer_name] = diff
 
-    return avg_directions
+    print(f"Extracted directions for {len(directions)} layers")
+    return directions
 
 
 # %% [markdown]
@@ -388,7 +428,7 @@ def compute_reasoning_length_direction(
 # %%
 # Test activation extraction on a simple example
 try:
-    test_prompt = "Solve this math problem step by step:\nIf there are 5 apples and 3 are eaten, how many remain?"
+    test_prompt = "Solve this math problem step by step, and put your final answer within \\boxed{}:\nIf there are 5 apples and 3 are eaten, how many remain?"
 
     if (
         "model" in locals()
@@ -485,7 +525,6 @@ def create_mock_responses(num_samples=2):
                     "thinking": f"This is thinking content for test {i}. It's a bit longer to simulate thinking.",
                     "response": f"The answer is {i}",
                 },
-                "without_thinking": {"thinking": "", "response": f"The answer is {i}"},
             }
         )
     return mock_responses

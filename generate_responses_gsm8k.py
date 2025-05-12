@@ -2,14 +2,18 @@
 # # Generating Responses from GSM8K
 #
 # This notebook generates and saves model responses from the GSM8K dataset.
-# We'll generate both thinking and non-thinking responses to create our paired dataset
+# We'll generate responses with thinking enabled to create our dataset
 # for identifying reasoning length direction.
 #
 # The notebook follows these steps:
 # 1. Load the GSM8K dataset
 # 2. Generate responses with thinking enabled
-# 3. Generate responses with thinking disabled
-# 4. Save the paired responses for later analysis
+# 3. Save the responses for later analysis
+#
+# This implementation follows best practices for Qwen models:
+# - Using appropriate sampling parameters (Temperature=0.6, TopP=0.95, TopK=20)
+# - Including step-by-step reasoning instructions
+# - Using adequate output length
 
 # %% [markdown]
 # ## Setup
@@ -61,16 +65,34 @@ def parse_args():
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=100,
+        default=200,  # Similar to ThinkEdit paper
         help="Number of samples to process from GSM8K",
     )
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=1024,
+        default=32768,  # Recommended for Qwen models
         help="Maximum number of new tokens to generate",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.6,  # Recommended for thinking mode
+        help="Temperature for sampling",
+    )
+    parser.add_argument(
+        "--top_p",
+        type=float,
+        default=0.95,  # Recommended for thinking mode
+        help="Top-p (nucleus) sampling parameter",
+    )
+    parser.add_argument(
+        "--top_k",
+        type=float,
+        default=20,  # Recommended for thinking mode
+        help="Top-k sampling parameter",
+    )
     return parser.parse_args()
 
 
@@ -88,8 +110,11 @@ class NotebookArgs:
         self.model = "Qwen/Qwen3-0.6B"  # Model to use
         self.output_dir = "responses"  # Directory to save responses
         self.num_samples = 5  # Use a small number for quick testing
-        self.max_new_tokens = 1024  # Maximum new tokens to generate
+        self.max_new_tokens = 32768  # Recommended for Qwen models
         self.seed = 42  # Random seed for reproducibility
+        self.temperature = 0.6  # Recommended for thinking mode
+        self.top_p = 0.95  # Recommended for thinking mode
+        self.top_k = 20  # Recommended for thinking mode
 
 
 # Use NotebookArgs when running as notebook, otherwise parse command line arguments
@@ -101,6 +126,9 @@ if "ipykernel" in sys.modules:
     print(f"- Model: {args.model}")
     print(f"- Number of samples: {args.num_samples}")
     print(f"- Output directory: {args.output_dir}")
+    print(f"- Temperature: {args.temperature}")
+    print(f"- Top-p: {args.top_p}")
+    print(f"- Top-k: {args.top_k}")
 else:
     args = parse_args()
     print("Running in script mode with parsed arguments")
@@ -138,29 +166,30 @@ if len(dataset) > 0:
 # %% [markdown]
 # ## Generate Responses
 #
-# Now let's define a function to generate responses from our model with and without thinking.
+# Now let's define a function to generate responses from our model with thinking enabled.
+# Following best practices for Qwen models:
+# - Using appropriate sampling parameters
+# - Including step-by-step reasoning instructions
+# - Properly handling thinking content
 
 
 # %%
-def generate_response(model, tokenizer, question, enable_thinking=True):
-    """Generate a response from the model with or without thinking."""
-    messages = [
-        {
-            "role": "user",
-            "content": f"Solve this math problem step by step:\n{question}",
-        }
-    ]
+def generate_response(model, tokenizer, question):
+    """Generate a response from the model with thinking enabled."""
+    # Include step-by-step reasoning instructions as recommended
+    prompt = f"Solve this math problem step by step, and put your final answer within \\boxed{{}}:\n{question}"
+
+    messages = [{"role": "user", "content": prompt}]
 
     text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
-        enable_thinking=enable_thinking,  # Toggle thinking mode
+        enable_thinking=True,  # Enable thinking mode
     )
 
-    # Let's see what the prompt looks like (for debugging)
-    if enable_thinking:
-        print(f"Prompt with thinking enabled (first 100 chars): {text[:100]}...")
+    # Print what the prompt looks like (for debugging)
+    print(f"Prompt (first 100 chars): {text[:100]}...")
 
     inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
@@ -168,39 +197,40 @@ def generate_response(model, tokenizer, question, enable_thinking=True):
         generated_ids = model.generate(
             **inputs,
             max_new_tokens=args.max_new_tokens,
-            do_sample=False,  # Use greedy decoding for deterministic outputs
+            do_sample=True,  # Use sampling as recommended (not greedy)
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
         )
 
     output_ids = generated_ids[0][len(inputs.input_ids[0]) :].tolist()
 
-    # Parse thinking content if applicable
-    if enable_thinking:
-        try:
-            # Find index of </think> token
-            think_end_token = tokenizer.encode("</think>", add_special_tokens=False)[-1]
-            think_end_index = (
-                output_ids.index(think_end_token)
-                if think_end_token in output_ids
-                else -1
-            )
+    # Parse thinking content
+    try:
+        # Find index of </think> token
+        think_end_token = tokenizer.encode("</think>", add_special_tokens=False)[-1]
+        think_end_index = (
+            output_ids.index(think_end_token) if think_end_token in output_ids else -1
+        )
 
-            if think_end_index != -1:
-                thinking_content = tokenizer.decode(
-                    output_ids[:think_end_index], skip_special_tokens=True
-                ).strip()
-                content = tokenizer.decode(
-                    output_ids[think_end_index + 1 :], skip_special_tokens=True
-                ).strip()
-                return {"thinking": thinking_content, "response": content}
-        except ValueError:
-            pass
+        if think_end_index != -1:
+            # Check if <think> tag is present at the beginning and remove it
+            thinking_content = tokenizer.decode(
+                output_ids[:think_end_index], skip_special_tokens=True
+            ).strip()
+            if thinking_content.startswith("<think>"):
+                thinking_content = thinking_content[len("<think>") :].strip()
 
-        # If no thinking token found or error occurred, return everything as response
-        content = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
-        return {"thinking": "", "response": content}
-    else:
-        content = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
-        return {"thinking": "", "response": content}
+            content = tokenizer.decode(
+                output_ids[think_end_index + 1 :], skip_special_tokens=True
+            ).strip()
+            return {"thinking": thinking_content, "response": content}
+    except ValueError:
+        pass
+
+    # If no thinking token found or error occurred, return everything as response
+    content = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+    return {"thinking": "", "response": content}
 
 
 # %% [markdown]
@@ -220,11 +250,9 @@ try:
     # Test with a simple problem
     test_question = "If there are 5 apples and 3 are eaten, how many remain?"
 
-    # With thinking enabled
+    # Generate with thinking enabled
     print("\nGenerating response with thinking enabled...")
-    thinking_result = generate_response(
-        model, tokenizer, test_question, enable_thinking=True
-    )
+    thinking_result = generate_response(model, tokenizer, test_question)
 
     print("\nThinking content:")
     print("-" * 50)
@@ -233,16 +261,6 @@ try:
     print("\nResponse content:")
     print("-" * 50)
     print(thinking_result["response"])
-
-    # With thinking disabled
-    print("\nGenerating response with thinking disabled...")
-    non_thinking_result = generate_response(
-        model, tokenizer, test_question, enable_thinking=False
-    )
-
-    print("\nResponse content (no thinking):")
-    print("-" * 50)
-    print(non_thinking_result["response"])
 
 except Exception as e:
     print(f"Error testing the model: {e}")
@@ -258,7 +276,7 @@ except Exception as e:
 
 # %%
 def main(args):
-    """Main function to process GSM8K examples and save paired responses."""
+    """Main function to process GSM8K examples and save responses."""
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
     model_short_name = args.model.split("/")[-1]
@@ -280,14 +298,7 @@ def main(args):
         question = example["question"]
 
         # Generate with thinking enabled
-        thinking_result = generate_response(
-            model, tokenizer, question, enable_thinking=True
-        )
-
-        # Generate with thinking disabled
-        # non_thinking_result = generate_response(
-        #     model, tokenizer, question, enable_thinking=False
-        # )
+        thinking_result = generate_response(model, tokenizer, question)
 
         # Save the results
         output = {
@@ -295,16 +306,15 @@ def main(args):
             "question": question,
             "answer": example["answer"],
             "with_thinking": thinking_result,
-            # "without_thinking": non_thinking_result,
         }
         outputs.append(output)
 
-        # Save all responses to a JSON file
-        output_path = os.path.join(
-            args.output_dir, f"{model_short_name}_gsm8k_responses.json"
-        )
-        with open(output_path, "w") as f:
-            json.dump(outputs, f, indent=2)
+    # Save all responses to a JSON file
+    output_path = os.path.join(
+        args.output_dir, f"{model_short_name}_gsm8k_responses.json"
+    )
+    with open(output_path, "w") as f:
+        json.dump(outputs, f, indent=2)
 
     print(f"Responses saved to {output_path}")
     return outputs
@@ -313,7 +323,7 @@ def main(args):
 # %% [markdown]
 # ## Execute the Main Function
 #
-# Let's run our main function to generate and save the paired responses.
+# Let's run our main function to generate and save the responses.
 # This might take a while depending on the number of samples and the model size.
 
 # %%
@@ -328,20 +338,17 @@ if __name__ == "__main__" or "ipykernel" in sys.modules:
 
     # In notebook mode, let's also examine the first saved response
     if "ipykernel" in sys.modules and outputs and len(outputs) > 0:
-        print("\nExample of a saved response pair:")
+        print("\nExample of a saved response:")
         print("-" * 50)
         print(f"Question: {outputs[0]['question']}")
         print(f"\nThinking: {outputs[0]['with_thinking']['thinking'][:200]}...")
         print(
             f"\nResponse (with thinking): {outputs[0]['with_thinking']['response'][:200]}..."
         )
-        # print(
-        #     f"\nResponse (without thinking): {outputs[0]['without_thinking']['response'][:200]}..."
-        # )
 
 # %% [markdown]
 # ## Next Steps
 #
-# Now that we've generated paired responses with and without thinking, we can use this data to extract the reasoning length direction.
+# Now that we've generated responses with thinking, we can use this data to extract the reasoning length direction.
 #
 # Continue to the next notebook: `extract_reasoning_length_direction.py`
