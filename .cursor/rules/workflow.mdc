@@ -1,0 +1,7 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+Use `steer` conda environment. 
+Add new requirements in `requirements.txt` as well.
