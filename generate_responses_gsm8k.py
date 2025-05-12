@@ -142,12 +142,13 @@ else:
 # %%
 def load_gsm8k_dataset(num_samples, seed=42):
     """Load and prepare the GSM8K dataset."""
-    dataset = load_dataset("gsm8k", "main")
+    # dataset = load_dataset("gsm8k", "main")
+    gsm8k = load_dataset("openai/gsm8k", "main", split="train[:2000]")
 
     # Use the train split and take a subset
-    train_data = dataset["train"].shuffle(seed=seed).select(range(num_samples))
+    # train_data = gsm8k.shuffle(seed=seed).select(range(num_samples))
 
-    return train_data
+    return gsm8k
 
 
 # %%
@@ -246,6 +247,7 @@ try:
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype="auto", device_map="auto"
     )
+    print(f"Model loaded on device: {model.device}")
 
     # Test with a simple problem
     test_question = "If there are 5 apples and 3 are eaten, how many remain?"
@@ -287,6 +289,7 @@ def main(args):
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype="auto", device_map="auto"
     )
+    print(f"Model loaded on device: {model.device}")
 
     # Load dataset
     print(f"Loading GSM8K dataset...")
@@ -309,12 +312,12 @@ def main(args):
         }
         outputs.append(output)
 
-    # Save all responses to a JSON file
-    output_path = os.path.join(
-        args.output_dir, f"{model_short_name}_gsm8k_responses.json"
-    )
-    with open(output_path, "w") as f:
-        json.dump(outputs, f, indent=2)
+        # Save all responses to a JSON file in every iteration so we don't lose any responses.
+        output_path = os.path.join(
+            args.output_dir, f"{model_short_name}_gsm8k_responses.json"
+        )
+        with open(output_path, "w") as f:
+            json.dump(outputs, f, indent=2)
 
     print(f"Responses saved to {output_path}")
     return outputs
