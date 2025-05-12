@@ -285,9 +285,9 @@ def main(args):
         )
 
         # Generate with thinking disabled
-        non_thinking_result = generate_response(
-            model, tokenizer, question, enable_thinking=False
-        )
+        # non_thinking_result = generate_response(
+        #     model, tokenizer, question, enable_thinking=False
+        # )
 
         # Save the results
         output = {
@@ -295,16 +295,16 @@ def main(args):
             "question": question,
             "answer": example["answer"],
             "with_thinking": thinking_result,
-            "without_thinking": non_thinking_result,
+            # "without_thinking": non_thinking_result,
         }
         outputs.append(output)
 
-    # Save all responses to a JSON file
-    output_path = os.path.join(
-        args.output_dir, f"{model_short_name}_gsm8k_responses.json"
-    )
-    with open(output_path, "w") as f:
-        json.dump(outputs, f, indent=2)
+        # Save all responses to a JSON file
+        output_path = os.path.join(
+            args.output_dir, f"{model_short_name}_gsm8k_responses.json"
+        )
+        with open(output_path, "w") as f:
+            json.dump(outputs, f, indent=2)
 
     print(f"Responses saved to {output_path}")
     return outputs
@@ -335,9 +335,9 @@ if __name__ == "__main__" or "ipykernel" in sys.modules:
         print(
             f"\nResponse (with thinking): {outputs[0]['with_thinking']['response'][:200]}..."
         )
-        print(
-            f"\nResponse (without thinking): {outputs[0]['without_thinking']['response'][:200]}..."
-        )
+        # print(
+        #     f"\nResponse (without thinking): {outputs[0]['without_thinking']['response'][:200]}..."
+        # )
 
 # %% [markdown]
 # ## Next Steps
