@@ -15,6 +15,24 @@
 # - Including step-by-step reasoning instructions
 # - Using the reasoning parser to separate thinking from responses
 # - Batch processing multiple examples in parallel
+# - Connecting to a Docker-based SGLang server for better compatibility
+
+# %% [markdown]
+# ## Prerequisites
+#
+# Before running this script, start the SGLang server using Docker with this command:
+#
+# ```bash
+# docker run --gpus all \
+#     --shm-size 32g \
+#     -p 30000:30000 \
+#     -v ~/.cache/huggingface:/root/.cache/huggingface \
+#     --ipc=host \
+#     lmsysorg/sglang:latest \
+#     python3 -m sglang.launch_server --model-path Qwen/Qwen3-0.6B --host 0.0.0.0 --port 30000 --reasoning-parser qwen3
+# ```
+#
+# You can customize the model path and port as needed.
 
 # %% [markdown]
 # ## Setup
@@ -31,7 +49,6 @@ from tqdm import tqdm
 from datasets import load_dataset
 from transformers import AutoTokenizer
 import sglang as sgl
-from sglang.srt.reasoning_parser import ReasoningParser
 
 # Display installed versions for reproducibility
 import sys
@@ -110,16 +127,10 @@ def parse_args():
         help="Number of requests to process in parallel",
     )
     parser.add_argument(
-        "--reasoning_parser",
+        "--server_url",
         type=str,
-        default="qwen3",
-        help="Reasoning parser type (qwen3, deepseek-r1)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=30000,
-        help="Port to use for SGLang server",
+        default="http://localhost:30000",
+        help="URL of the SGLang server",
     )
     return parser.parse_args()
 
@@ -144,8 +155,7 @@ class NotebookArgs:
         self.top_p = 0.95  # Recommended for thinking mode
         self.top_k = 20  # Recommended for thinking mode
         self.batch_size = 4  # Process multiple requests in parallel
-        self.reasoning_parser = "qwen3"  # Reasoning parser type
-        self.port = 30000  # Port for SGLang server
+        self.server_url = "http://localhost:30000"  # URL of the SGLang server
 
 
 # Use NotebookArgs when running as notebook, otherwise parse command line arguments
@@ -161,7 +171,7 @@ if "ipykernel" in sys.modules:
     print(f"- Top-p: {args.top_p}")
     print(f"- Top-k: {args.top_k}")
     print(f"- Batch size: {args.batch_size}")
-    print(f"- Reasoning parser: {args.reasoning_parser}")
+    print(f"- Server URL: {args.server_url}")
 else:
     args = parse_args()
     print("Running in script mode with parsed arguments")
@@ -198,33 +208,42 @@ if len(dataset) > 0:
     print(f"Answer: {example['answer']}")
 
 # %% [markdown]
-# ## Initialize SGLang Engine/Server
+# ## Connect to SGLang Server
 #
-# Now let's set up the SGLang engine to handle our requests efficiently.
+# Now let's connect to the SGLang server running in Docker.
 
 
 # %%
-def initialize_sglang(args):
-    """Initialize SGLang engine with the specified model."""
-    print(f"Initializing SGLang with model {args.model}...")
+def connect_to_sglang(server_url):
+    """Connect to the SGLang server."""
+    print(f"Connecting to SGLang server at {server_url}...")
 
-    # Launch the server with reasoning parser enabled
-    from sglang.utils import launch_server_cmd, wait_for_server
+    try:
+        # Create the SGLang client
+        client = sgl.Client(api_base=server_url)
 
-    server_process, port = launch_server_cmd(
-        f"python -m sglang.launch_server --model-path {args.model} "
-        f"--host 0.0.0.0 --port {args.port} "
-        f"--reasoning-parser {args.reasoning_parser}"
-    )
+        # Test the connection with a simple query to ensure it's working
+        client.health()
+        print(f"Successfully connected to SGLang server at {server_url}")
 
-    wait_for_server(f"http://localhost:{port}")
-
-    # Create the SGLang client
-    client = sgl.Client(api_base=f"http://localhost:{port}")
-
-    print(f"SGLang initialized on port {port}")
-
-    return client, server_process, port
+        return client
+    except Exception as e:
+        print(f"Error connecting to SGLang server: {e}")
+        print(
+            "\nPlease ensure the SGLang server is running with Docker using the command:"
+        )
+        print(
+            f"""
+docker run --gpus all \\
+    --shm-size 32g \\
+    -p 30000:30000 \\
+    -v ~/.cache/huggingface:/root/.cache/huggingface \\
+    --ipc=host \\
+    lmsysorg/sglang:latest \\
+    python3 -m sglang.launch_server --model-path {args.model} --host 0.0.0.0 --port 30000 --reasoning-parser qwen3
+        """
+        )
+        raise
 
 
 # %% [markdown]
@@ -247,9 +266,6 @@ def generate_response(client, tokenizer, question):
         tokenize=False,
         add_generation_prompt=True,
     )
-
-    # Print what the prompt looks like (for debugging)
-    print(f"Prompt (first 100 chars): {text[:100]}...")
 
     # Define sampling parameters
     sampling_params = {
@@ -343,8 +359,8 @@ try:
     # Initialize tokenizer directly
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
-    # Initialize SGLang client and server
-    client, server_process, port = initialize_sglang(args)
+    # Connect to the SGLang server
+    client = connect_to_sglang(args.server_url)
 
     test_question = "If there are 5 apples and 3 are eaten, how many remain?"
 
@@ -360,15 +376,10 @@ try:
     print("-" * 50)
     print(thinking_result["response"])
 
-    # Clean up
-    from sglang.utils import terminate_process
-
-    terminate_process(server_process)
-
 except Exception as e:
     print(f"Error testing the model: {e}")
     print(
-        "If you're running in a limited environment, comment out this test cell and proceed to the main function."
+        "Please ensure the SGLang server is running in Docker before executing this script."
     )
 
 # %% [markdown]
@@ -388,8 +399,8 @@ def main(args):
     print(f"Loading tokenizer for {args.model}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
-    # Initialize SGLang
-    client, server_process, port = initialize_sglang(args)
+    # Connect to SGLang server
+    client = connect_to_sglang(args.server_url)
 
     try:
         # Load dataset
@@ -415,12 +426,9 @@ def main(args):
         print(f"All responses saved to {output_path}")
         return outputs
 
-    finally:
-        # Clean up SGLang server
-        from sglang.utils import terminate_process
-
-        terminate_process(server_process)
-        print("SGLang server terminated")
+    except Exception as e:
+        print(f"Error in main process: {e}")
+        return []
 
 
 # %% [markdown]
