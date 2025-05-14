@@ -189,11 +189,13 @@ else:
 # %%
 def load_gsm8k_dataset(num_samples, seed=42):
     """Load and prepare the GSM8K dataset."""
-    # dataset = load_dataset("gsm8k", "main")
-    gsm8k = load_dataset("openai/gsm8k", "main", split="train[:2000]")
+    print(f"Loading GSM8K with num_samples={num_samples}")
+    gsm8k = load_dataset("openai/gsm8k", "main", split="train")
 
-    # Use the train split and take a subset
-    # train_data = gsm8k.shuffle(seed=seed).select(range(num_samples))
+    # Shuffle and select subset if needed
+    if num_samples and num_samples < len(gsm8k):
+        gsm8k = gsm8k.shuffle(seed=seed).select(range(num_samples))
+        print(f"Selected {num_samples} examples after shuffling")
 
     return gsm8k
 
@@ -267,33 +269,44 @@ def generate_response(server_url, tokenizer, question):
         add_generation_prompt=True,
     )
 
-    # Define sampling parameters
-    sampling_params = {
-        "prompt": text,
-        "max_tokens": args.max_new_tokens,
-        "temperature": args.temperature,
-        "top_p": args.top_p,
-        "top_k": args.top_k,
+    # Define request payload for generation
+    generate_payload = {
+        "text": text,
+        "sampling_params": {
+            "max_new_tokens": args.max_new_tokens,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "top_k": args.top_k,
+        },
     }
 
     # Generate with SGLang's API via direct HTTP request
     try:
         # Generate the text
-        response = requests.post(f"{server_url}/generate", json=sampling_params)
+        response = requests.post(f"{server_url}/generate", json=generate_payload)
         response.raise_for_status()
         result = response.json()
-        generated_text = result.get("text", "")
+        generated_text = result["text"]
 
         # Use separate_reasoning to extract thinking and response
+        reasoning_payload = {"text": generated_text, "reasoning_parser": "qwen3"}
         reasoning_response = requests.post(
-            f"{server_url}/separate_reasoning", json={"content": generated_text}
+            f"{server_url}/separate_reasoning", json=reasoning_payload
         )
         reasoning_response.raise_for_status()
         reasoning_result = reasoning_response.json()
 
         return {
-            "thinking": reasoning_result.get("reasoning", ""),
+            "thinking": reasoning_result.get("reasoning_text", ""),
             "response": reasoning_result.get("text", generated_text),
+        }
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP error in generation: {e}")
+        if hasattr(e, "response") and hasattr(e.response, "text"):
+            print(f"Response content: {e.response.text}")
+        return {
+            "thinking": "",
+            "response": f"Error: {str(e)}",
         }
     except Exception as e:
         print(f"Error in generation: {e}")
@@ -317,41 +330,46 @@ def process_batch(server_url, tokenizer, batch, start_idx):
     """Process a batch of examples in parallel."""
     results = []
 
+    # Extract the lists of questions and answers from the batch
+    questions = batch["question"]
+    answers = batch["answer"]
+
     # Create a thread pool to process the batch
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch)) as executor:
-        future_to_idx = {
-            executor.submit(
-                generate_response, server_url, tokenizer, example["question"]
-            ): i
-            for i, example in enumerate(batch)
-        }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(questions)) as executor:
+        future_to_idx = {}
+
+        for i, question in enumerate(questions):
+            answer = answers[i] if i < len(answers) else ""
+
+            # Submit the task to the executor
+            future = executor.submit(generate_response, server_url, tokenizer, question)
+            future_to_idx[future] = (i, question, answer)
 
         for future in tqdm(
             concurrent.futures.as_completed(future_to_idx),
-            total=len(batch),
+            total=len(questions),
             desc=f"Batch starting at {start_idx}",
         ):
-            idx = future_to_idx[future]
-            example = batch[idx]
+            i, question, answer = future_to_idx[future]
             try:
                 thinking_result = future.result()
 
                 # Save the results
                 output = {
-                    "id": start_idx + idx,
-                    "question": example["question"],
-                    "answer": example["answer"],
+                    "id": start_idx + i,
+                    "question": question,
+                    "answer": answer,
                     "with_thinking": thinking_result,
                 }
                 results.append(output)
 
             except Exception as e:
-                print(f"Error processing example {start_idx + idx}: {e}")
+                print(f"Error processing example {start_idx + i}: {e}")
                 # Add a placeholder for failed requests
                 output = {
-                    "id": start_idx + idx,
-                    "question": example["question"],
-                    "answer": example["answer"],
+                    "id": start_idx + i,
+                    "question": question,
+                    "answer": answer,
                     "with_thinking": {"thinking": "", "response": f"Error: {str(e)}"},
                     "error": str(e),
                 }
@@ -373,12 +391,19 @@ try:
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
     # Connect to the SGLang server
-    server_url = connect_to_sglang(args.server_url)
+    server_url = args.server_url
+
+    # Test server connection
+    response = requests.get(f"{server_url}/health")
+    response.raise_for_status()
+    print(f"Successfully connected to SGLang server at {server_url}")
 
     test_question = "If there are 5 apples and 3 are eaten, how many remain?"
 
     # Generate with thinking enabled
     print("\nGenerating response with thinking enabled...")
+
+    # Use the same generate_response function as used for the full dataset
     thinking_result = generate_response(server_url, tokenizer, test_question)
 
     print("\nThinking content:")
@@ -391,6 +416,9 @@ try:
 
 except Exception as e:
     print(f"Error testing the model: {e}")
+    print(f"Type of error: {type(e)}")
+    if hasattr(e, "response") and hasattr(e.response, "text"):
+        print(f"Response content: {e.response.text}")
     print(
         "Please ensure the SGLang server is running in another terminal before executing this script."
     )
@@ -420,10 +448,28 @@ def main(args):
         print(f"Loading GSM8K dataset...")
         dataset = load_gsm8k_dataset(args.num_samples, args.seed)
 
+        # Debug dataset structure
+        print(f"Dataset has {len(dataset)} examples")
+        print(f"Dataset features: {dataset.features}")
+        if len(dataset) > 0:
+            print(f"Sample batch keys: {list(dataset[0:1].keys())}")
+            print(f"Number of questions in sample: {len(dataset[0:1]['question'])}")
+            print(f"First question: {dataset[0:1]['question'][0]}")
+
+        # Take a subset of the dataset based on num_samples
+        if args.num_samples < len(dataset):
+            dataset = dataset.select(range(args.num_samples))
+            print(f"Selected {args.num_samples} examples from the dataset")
+
         # Process dataset in batches
         outputs = []
-        for i in range(0, len(dataset), args.batch_size):
-            batch = dataset[i : i + args.batch_size]
+        num_examples = len(dataset)
+        for i in range(0, num_examples, args.batch_size):
+            end_idx = min(i + args.batch_size, num_examples)
+            batch = dataset[i:end_idx]
+            print(
+                f"Processing batch of {len(batch['question'])} examples starting at index {i}"
+            )
             batch_results = process_batch(server_url, tokenizer, batch, i)
             outputs.extend(batch_results)
 
@@ -441,6 +487,9 @@ def main(args):
 
     except Exception as e:
         print(f"Error in main process: {e}")
+        import traceback
+
+        traceback.print_exc()
         return []
 
 
