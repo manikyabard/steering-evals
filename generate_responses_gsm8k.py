@@ -47,6 +47,7 @@ import os
 import json
 import torch
 import argparse
+import requests
 import concurrent.futures
 from tqdm import tqdm
 from datasets import load_dataset
@@ -218,18 +219,16 @@ if len(dataset) > 0:
 
 # %%
 def connect_to_sglang(server_url):
-    """Connect to the SGLang server."""
-    print(f"Connecting to SGLang server at {server_url}...")
+    """Test connection to the SGLang server."""
+    print(f"Testing connection to SGLang server at {server_url}...")
 
     try:
-        # Create the SGLang client
-        client = sgl.Client(api_base=server_url)
-
-        # Test the connection with a simple health check
-        client.health()
+        # Test the connection with a health check
+        response = requests.get(f"{server_url}/health")
+        response.raise_for_status()
         print(f"Successfully connected to SGLang server at {server_url}")
 
-        return client
+        return server_url
     except Exception as e:
         print(f"Error connecting to SGLang server: {e}")
         print("\nPlease ensure the SGLang server is running in another terminal with:")
@@ -254,8 +253,8 @@ python -m sglang.launch_server \\
 
 
 # %%
-def generate_response(client, tokenizer, question):
-    """Generate a response from the model with thinking enabled using SGLang."""
+def generate_response(server_url, tokenizer, question):
+    """Generate a response from the model with thinking enabled using direct HTTP requests."""
     # Include step-by-step reasoning instructions as recommended
     prompt = f"Solve this math problem step by step, and put your final answer within \\boxed{{}}:\n{question}"
 
@@ -270,28 +269,31 @@ def generate_response(client, tokenizer, question):
 
     # Define sampling parameters
     sampling_params = {
-        "max_new_tokens": args.max_new_tokens,
+        "prompt": text,
+        "max_tokens": args.max_new_tokens,
         "temperature": args.temperature,
         "top_p": args.top_p,
         "top_k": args.top_k,
     }
 
-    # Generate with SGLang's API
+    # Generate with SGLang's API via direct HTTP request
     try:
-        response = client.generate(
-            prompt=text,
-            sampling_params=sampling_params,
+        # Generate the text
+        response = requests.post(f"{server_url}/generate", json=sampling_params)
+        response.raise_for_status()
+        result = response.json()
+        generated_text = result.get("text", "")
+
+        # Use separate_reasoning to extract thinking and response
+        reasoning_response = requests.post(
+            f"{server_url}/separate_reasoning", json={"content": generated_text}
         )
-
-        # Get the completed text
-        generated_text = response["text"]
-
-        # Use the separate_reasoning endpoint to extract thinking and response
-        separate_response = client.separate_reasoning(content=generated_text)
+        reasoning_response.raise_for_status()
+        reasoning_result = reasoning_response.json()
 
         return {
-            "thinking": separate_response.get("reasoning", ""),
-            "response": separate_response.get("text", generated_text),
+            "thinking": reasoning_result.get("reasoning", ""),
+            "response": reasoning_result.get("text", generated_text),
         }
     except Exception as e:
         print(f"Error in generation: {e}")
@@ -311,7 +313,7 @@ def generate_response(client, tokenizer, question):
 
 
 # %%
-def process_batch(client, tokenizer, batch, start_idx):
+def process_batch(server_url, tokenizer, batch, start_idx):
     """Process a batch of examples in parallel."""
     results = []
 
@@ -319,7 +321,7 @@ def process_batch(client, tokenizer, batch, start_idx):
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch)) as executor:
         future_to_idx = {
             executor.submit(
-                generate_response, client, tokenizer, example["question"]
+                generate_response, server_url, tokenizer, example["question"]
             ): i
             for i, example in enumerate(batch)
         }
@@ -371,13 +373,13 @@ try:
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
     # Connect to the SGLang server
-    client = connect_to_sglang(args.server_url)
+    server_url = connect_to_sglang(args.server_url)
 
     test_question = "If there are 5 apples and 3 are eaten, how many remain?"
 
     # Generate with thinking enabled
     print("\nGenerating response with thinking enabled...")
-    thinking_result = generate_response(client, tokenizer, test_question)
+    thinking_result = generate_response(server_url, tokenizer, test_question)
 
     print("\nThinking content:")
     print("-" * 50)
@@ -412,7 +414,7 @@ def main(args):
 
     # Connect to SGLang server
     try:
-        client = connect_to_sglang(args.server_url)
+        server_url = connect_to_sglang(args.server_url)
 
         # Load dataset
         print(f"Loading GSM8K dataset...")
@@ -422,7 +424,7 @@ def main(args):
         outputs = []
         for i in range(0, len(dataset), args.batch_size):
             batch = dataset[i : i + args.batch_size]
-            batch_results = process_batch(client, tokenizer, batch, i)
+            batch_results = process_batch(server_url, tokenizer, batch, i)
             outputs.extend(batch_results)
 
             # Save all responses to a JSON file after each batch
