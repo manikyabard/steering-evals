@@ -19,7 +19,7 @@ pip install -r requirements.txt
 
 The codebase consists of three main scripts:
 
-1. `generate_responses_gsm8k.py`: Generates and saves model responses from GSM8K, both with and without the "thinking" mode.
+1. `generate_responses_gsm8k.py`: Generates and saves model responses from GSM8K with thinking enabled using SGLang for faster inference and parallelization.
 2. `extract_reasoning_length_direction.py`: Uses the paired responses to extract the reasoning length direction vectors.
 3. `steer_reasoning_length.py`: Applies the extracted directions during generation to control reasoning length.
 
@@ -27,13 +27,24 @@ The codebase consists of three main scripts:
 
 ### Step 1: Generate Responses
 
-Generate responses from the GSM8K dataset with both thinking and non-thinking modes:
+First, start the SGLang server in a separate terminal:
 
 ```bash
-python generate_responses_gsm8k.py --model Qwen/Qwen3-0.6B --num_samples 100
+python -m sglang.launch_server \
+    --model-path Qwen/Qwen3-0.6B \
+    --reasoning-parser qwen3
 ```
 
-This will create a JSON file with paired responses in the `responses` directory.
+Then generate responses from the GSM8K dataset with thinking enabled:
+
+```bash
+python generate_responses_gsm8k.py --model Qwen/Qwen3-0.6B --num_samples 1000 --batch_size 64
+```
+
+This will create a JSON file with responses in the `responses` directory. The SGLang implementation offers:
+- Faster inference with batch processing
+- Automatic separation of thinking from responses using a reasoning parser
+- Configurable sampling parameters (Temperature, TopP, TopK)
 
 ### Step 2: Extract Reasoning Length Direction
 
@@ -63,6 +74,13 @@ All scripts support various command-line arguments. Here are some important ones
 - `--num_samples`: Number of samples to process (default varies by script)
 - `--component`: Which components to steer (attn, mlp, or both) (default: attn)
 - `--direction_weights`: List of steering strengths to apply (default: [-0.08, -0.04, 0, 0.04, 0.08])
+
+Parameters specific to `generate_responses_gsm8k.py`:
+- `--batch_size`: Number of requests to process in parallel (default: 4)
+- `--server_url`: URL of the SGLang server (default: "http://localhost:30000")
+- `--temperature`: Temperature for sampling (default: 0.6)
+- `--top_p`: Top-p (nucleus) sampling parameter (default: 0.95)
+- `--top_k`: Top-k sampling parameter (default: 20)
 
 Run any script with `--help` to see all available options.
 
