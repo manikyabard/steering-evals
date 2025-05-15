@@ -25,10 +25,8 @@
 # ```bash
 # python -m sglang.launch_server \
 #     --model-path Qwen/Qwen3-0.6B \
-#     --host 0.0.0.0 \
 #     --port 30000 \
 #     --reasoning-parser qwen3 \
-#     --disable-cuda-graph
 # ```
 #
 # You can add other server arguments as needed:
@@ -96,7 +94,7 @@ def parse_args():
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=200,  # Similar to ThinkEdit paper
+        default=2000,  # Similar to ThinkEdit paper
         help="Number of samples to process from GSM8K",
     )
     parser.add_argument(
@@ -127,7 +125,7 @@ def parse_args():
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=4,
+        default=64,
         help="Number of requests to process in parallel",
     )
     parser.add_argument(

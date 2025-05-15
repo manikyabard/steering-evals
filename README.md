@@ -6,7 +6,7 @@ This repository contains code for experimenting with steering reasoning length i
 
 1. Create a conda environment and activate it:
 ```bash
-conda create -n steer python=3.10
+conda create -n steer python=3.11
 conda activate steer
 ```
 
@@ -14,6 +14,8 @@ conda activate steer
 ```bash
 pip install -r requirements.txt
 ```
+
+3. Install SGLang by following the instructions [here](https://docs.sglang.ai/backend/installation.html).
 
 ## Available Scripts
 
@@ -38,7 +40,7 @@ python -m sglang.launch_server \
 Then generate responses from the GSM8K dataset with thinking enabled:
 
 ```bash
-python generate_responses_gsm8k.py --model Qwen/Qwen3-0.6B --num_samples 1000 --batch_size 64
+python generate_responses_gsm8k.py --model Qwen/Qwen3-0.6B --num_samples 2000 --batch_size 64
 ```
 
 This will create a JSON file with responses in the `responses` directory. The SGLang implementation offers:
