@@ -75,7 +75,7 @@ def parse_args():
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=50,
+        default=2000,
         help="Number of samples to use for direction extraction",
     )
     return parser.parse_args()
@@ -158,17 +158,26 @@ else:
 class ActivationExtractor:
     """Extract and store activations from specific layers of the model."""
 
-    def __init__(self, model):
+    def __init__(self, model, extraction_type="both"):
+        """
+        Initialize the activation extractor.
+
+        Args:
+            model: The model to extract activations from
+            extraction_type: The type of extraction to perform, one of "attention", "mlp", or "both"
+        """
         self.model = model
         self.activations = {}
         self.hooks = []
+        self.extraction_type = extraction_type
 
         # Determine model architecture and set up accordingly
-        if "Qwen" in model.__class__.__name__:
-            self.setup_qwen_hooks()
-        else:
-            # Default setup for other models
-            self.setup_default_hooks()
+        if self.extraction_type in ["attention", "both"]:
+            if "Qwen" in model.__class__.__name__:
+                self.setup_qwen_hooks()
+            else:
+                # Default setup for other models
+                self.setup_default_hooks()
 
     def setup_qwen_hooks(self):
         """Set up hooks for Qwen models."""
@@ -181,39 +190,61 @@ class ActivationExtractor:
                 )
             )
 
-            # Add hooks for MLP layers
-            mlp_hook = block.mlp.register_forward_hook(
-                lambda module, input, output, layer_idx=i: self._save_mlp_output(
-                    output, layer_idx
+            # Add hooks for MLP layers if needed
+            if self.extraction_type == "both":
+                mlp_hook = block.mlp.register_forward_hook(
+                    lambda module, input, output, layer_idx=i: self._save_mlp_output(
+                        output, layer_idx
+                    )
                 )
-            )
-
-            self.hooks.extend([attn_hook, mlp_hook])
+                self.hooks.extend([attn_hook, mlp_hook])
+            else:
+                self.hooks.append(attn_hook)
 
     def setup_default_hooks(self):
         """Set up hooks for other model architectures."""
+        # For handling different model architectures
+        try:
+            layers = self.model.model.layers
+        except:
+            try:
+                layers = self.model.transformer.h
+            except:
+                print("Could not identify model layers, using empty list")
+                layers = []
+
         # Generic approach for transformer models
-        for i, block in enumerate(self.model.model.layers):
+        for i, block in enumerate(layers):
             # Try common attention layer names
             if hasattr(block, "self_attn"):
-                attn_hook = block.self_attn.register_forward_hook(
+                attn_layer = block.self_attn
+                attn_hook = attn_layer.register_forward_hook(
+                    lambda module, input, output, layer_idx=i: self._save_attention_output(
+                        output, layer_idx
+                    )
+                )
+                self.hooks.append(attn_hook)
+            elif hasattr(block, "attention"):
+                attn_layer = block.attention
+                attn_hook = attn_layer.register_forward_hook(
                     lambda module, input, output, layer_idx=i: self._save_attention_output(
                         output, layer_idx
                     )
                 )
                 self.hooks.append(attn_hook)
 
-            # Try common MLP layer names
-            for mlp_name in ["mlp", "feed_forward", "ffn"]:
-                if hasattr(block, mlp_name):
-                    mlp_layer = getattr(block, mlp_name)
-                    mlp_hook = mlp_layer.register_forward_hook(
-                        lambda module, input, output, layer_idx=i: self._save_mlp_output(
-                            output, layer_idx
+            # Try common MLP layer names if both extraction types are requested
+            if self.extraction_type in ["both", "mlp"]:
+                for mlp_name in ["mlp", "feed_forward", "ffn"]:
+                    if hasattr(block, mlp_name):
+                        mlp_layer = getattr(block, mlp_name)
+                        mlp_hook = mlp_layer.register_forward_hook(
+                            lambda module, input, output, layer_idx=i: self._save_mlp_output(
+                                output, layer_idx
+                            )
                         )
-                    )
-                    self.hooks.append(mlp_hook)
-                    break
+                        self.hooks.append(mlp_hook)
+                        break
 
     def _save_attention_output(self, output, layer_idx):
         """Save self-attention output activations."""
@@ -244,11 +275,15 @@ class ActivationExtractor:
     def get_active_layers(self):
         """Return the list of layer names that have hooks attached."""
         layer_types = []
-        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
-            num_layers = len(self.model.model.layers)
-            for i in range(num_layers):
-                layer_types.append(f"attn_layer_{i}")
-                layer_types.append(f"mlp_layer_{i}")
+        try:
+            if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
+                num_layers = len(self.model.model.layers)
+                if self.extraction_type in ["attention", "both"]:
+                    layer_types.extend([f"attn_layer_{i}" for i in range(num_layers)])
+                if self.extraction_type in ["mlp", "both"]:
+                    layer_types.extend([f"mlp_layer_{i}" for i in range(num_layers)])
+        except:
+            pass
         return layer_types
 
 
@@ -299,8 +334,22 @@ def get_activations_for_text(model, tokenizer, activation_extractor, text):
     activation_extractor.clear_activations()
 
     # Forward pass through the model to capture activations
+    # If MLP direction (using hidden states), use output_hidden_states=True
     with torch.no_grad():
-        model(**inputs)
+        # For models that support output_hidden_states
+        try:
+            outputs = model(**inputs, output_hidden_states=True)
+            # For MLP direction extraction, collect hidden states
+            hidden_states = outputs.hidden_states[1:]  # Skip embeddings
+            # Store these hidden states as activations
+            for i, hidden_state in enumerate(hidden_states):
+                activation_extractor.activations[f"mlp_layer_{i}"] = (
+                    hidden_state.detach()
+                )
+        except:
+            # Fallback to regular forward pass if output_hidden_states not supported
+            model(**inputs)
+            # Activations are collected through hooks
 
     # Return a copy of the activations
     return {k: v.clone() for k, v in activation_extractor.activations.items()}
@@ -315,12 +364,8 @@ def compute_reasoning_length_direction(
     valid_responses = [
         ex
         for ex in response_data
-        if "thinking" in ex["with_thinking"] and ex["with_thinking"]["thinking"]
+        if "thinking_length" in ex and ex["thinking_length"] != -1
     ]
-
-    # Calculate thinking length for each example
-    for ex in valid_responses:
-        ex["thinking_length"] = len(ex["with_thinking"]["thinking"])
 
     # Sort by thinking length
     valid_responses.sort(key=lambda x: x["thinking_length"])
@@ -350,19 +395,31 @@ def compute_reasoning_length_direction(
     ):
         item = long_thinking_examples[idx]
         question = item["question"]
-        thinking = item["with_thinking"]["thinking"]
+        thinking = (
+            item["with_thinking"]["thinking"]
+            if "with_thinking" in item
+            else item["thinking"]
+        )
 
-        # Create prompt for thinking content
-        prompt = f"Solve this math problem step by step, and put your final answer within \\boxed{{}}:\n{question}\n{thinking}"
+        # Create prompt with specific format like in reference files
+        prompt = f"<|User|>{question}<|Assistant|>{thinking}"
+
+        # Tokenize to get start and end indices of the thinking section
+        toks = tokenizer(f"<|User|>{question}<|Assistant|>").input_ids
+        start = len(toks)
+        toks_full = tokenizer(prompt).input_ids
+        end = len(toks_full)
 
         # Get activations
         activations = get_activations_for_text(
             model, tokenizer, activation_extractor, prompt
         )
 
-        # Store activations for each layer
+        # Store activations for each layer, focusing on the thinking section
         for layer_name, layer_activation in activations.items():
-            long_thinking_activations[layer_name].append(layer_activation)
+            # Extract just the thinking section and average across tokens (similar to reference file approach)
+            mean_activation = layer_activation[:, start - 1 : end - 1, :].mean(dim=1)
+            long_thinking_activations[layer_name].append(mean_activation)
 
     # Process short thinking examples
     for idx in tqdm(
@@ -370,19 +427,31 @@ def compute_reasoning_length_direction(
     ):
         item = short_thinking_examples[idx]
         question = item["question"]
-        thinking = item["with_thinking"]["thinking"]
+        thinking = (
+            item["with_thinking"]["thinking"]
+            if "with_thinking" in item
+            else item["thinking"]
+        )
 
-        # Create prompt for thinking content
-        prompt = f"Solve this math problem step by step, and put your final answer within \\boxed{{}}:\n{question}\n{thinking}"
+        # Create prompt with specific format like in reference files
+        prompt = f"<|User|>{question}<|Assistant|>{thinking}"
+
+        # Tokenize to get start and end indices of the thinking section
+        toks = tokenizer(f"<|User|>{question}<|Assistant|>").input_ids
+        start = len(toks)
+        toks_full = tokenizer(prompt).input_ids
+        end = len(toks_full)
 
         # Get activations
         activations = get_activations_for_text(
             model, tokenizer, activation_extractor, prompt
         )
 
-        # Store activations for each layer
+        # Store activations for each layer, focusing on the thinking section
         for layer_name, layer_activation in activations.items():
-            short_thinking_activations[layer_name].append(layer_activation)
+            # Extract just the thinking section and average across tokens
+            mean_activation = layer_activation[:, start - 1 : end - 1, :].mean(dim=1)
+            short_thinking_activations[layer_name].append(mean_activation)
 
     # Calculate mean activations for long and short thinking examples
     long_mean_activations = {}
@@ -587,48 +656,97 @@ def main(args):
     with open(responses_file, "r") as f:
         responses = json.load(f)
 
+    # Make sure thinking_length is set for all examples
+    for ex in responses:
+        if "thinking_length" not in ex:
+            if "with_thinking" in ex and "thinking" in ex["with_thinking"]:
+                ex["thinking_length"] = len(ex["with_thinking"]["thinking"])
+            else:
+                ex["thinking_length"] = -1
+
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Load model and tokenizer
     print(f"Loading model {args.model}...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model, trust_remote_code=True, use_fast=False
+    )
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype="auto", device_map="auto"
     )
 
-    # Create activation extractor
-    activation_extractor = ActivationExtractor(model)
+    # Set pad token if needed
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-    # Extract reasoning length directions
-    print("Extracting reasoning length directions...")
-    directions = compute_reasoning_length_direction(
-        model, tokenizer, responses, activation_extractor, args.num_samples
+    # Extract directions using both methods (attention and MLP)
+    directions = {}
+
+    # Extract attention-based direction
+    print("Extracting attention-based reasoning length direction...")
+    attn_extractor = ActivationExtractor(model, extraction_type="attention")
+    attn_directions = compute_reasoning_length_direction(
+        model, tokenizer, responses, attn_extractor, args.num_samples
     )
+    attn_extractor.remove_hooks()
 
-    # Remove hooks to free up resources
-    activation_extractor.remove_hooks()
+    if attn_directions:
+        # Save attention-based directions
+        attn_output_file = os.path.join(
+            args.output_dir,
+            f"{model_short_name}_reasoning_length_direction_gsm8k_attn.pt",
+        )
+        torch.save(attn_directions, attn_output_file)
+        print(f"Attention-based directions saved to {attn_output_file}")
 
-    # Save directions
-    print("Saving directions...")
-    output_file = os.path.join(
-        args.output_dir, f"{model_short_name}_reasoning_length_directions.pt"
+        # Visualize attention-based directions
+        visualize_directions(
+            attn_directions, args.output_dir, f"{args.model} (Attention)"
+        )
+
+        directions.update(attn_directions)
+
+    # Extract MLP-based direction
+    print("Extracting MLP-based reasoning length direction...")
+    mlp_extractor = ActivationExtractor(model, extraction_type="mlp")
+    mlp_directions = compute_reasoning_length_direction(
+        model, tokenizer, responses, mlp_extractor, args.num_samples
     )
-    torch.save(directions, output_file)
+    mlp_extractor.remove_hooks()
 
-    # Visualize directions
-    print("Visualizing directions...")
-    visualize_directions(directions, args.output_dir, args.model)
+    if mlp_directions:
+        # Save MLP-based directions
+        mlp_output_file = os.path.join(
+            args.output_dir,
+            f"{model_short_name}_reasoning_length_direction_gsm8k_mlp.pt",
+        )
+        torch.save(mlp_directions, mlp_output_file)
+        print(f"MLP-based directions saved to {mlp_output_file}")
 
-    print(f"Done! Directions saved to {output_file}")
+        # Visualize MLP-based directions
+        visualize_directions(mlp_directions, args.output_dir, f"{args.model} (MLP)")
 
+        directions.update(mlp_directions)
+
+    # Save combined directions
+    if directions:
+        combined_output_file = os.path.join(
+            args.output_dir, f"{model_short_name}_reasoning_length_directions.pt"
+        )
+        torch.save(directions, combined_output_file)
+        print(f"Combined directions saved to {combined_output_file}")
+
+    print("Direction extraction complete!")
     return directions
 
 
 # %% [markdown]
-# ## Execute the Main Function
+# ## Next Steps
 #
-# Let's run the main function to extract reasoning length directions.
+# Now that we've extracted the reasoning length direction vectors, we can use them to steer the model's reasoning.
+#
+# Continue to the next notebook: `steer_reasoning_length.py`
 
 # %%
 # Execute the main function when running as a script or if explicitly requested
@@ -638,40 +756,57 @@ if __name__ == "__main__" or "ipykernel" in sys.modules:
         # Use a smaller number of samples for interactive testing
         args.num_samples = min(args.num_samples, 10)
 
-    # Run the main function
-    directions = main(args)
+    # Make sure the directories exist
+    os.makedirs(args.responses_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    # In notebook mode, let's examine the directions
-    if "ipykernel" in sys.modules and directions:
-        print("\nExtracted directions:")
-        print("-" * 50)
+    # Load responses
+    model_short_name = args.model.split("/")[-1]
+    responses_file = os.path.join(
+        args.responses_dir, f"{model_short_name}_gsm8k_responses.json"
+    )
 
-        # Get layer names and their magnitude
-        layer_norms = {
-            layer: torch.norm(vec).item() for layer, vec in directions.items()
-        }
+    if os.path.exists(responses_file):
+        with open(responses_file, "r") as f:
+            responses = json.load(f)
 
-        # Find the layer with the highest magnitude
-        max_layer = max(layer_norms.items(), key=lambda x: x[1])
-        print(
-            f"Layer with highest magnitude: {max_layer[0]} (norm: {max_layer[1]:.4f})"
-        )
+        # Add thinking_length field if not present
+        for ex in responses:
+            if "with_thinking" in ex and "thinking" in ex["with_thinking"]:
+                ex["thinking_length"] = len(ex["with_thinking"]["thinking"])
+            else:
+                ex["thinking_length"] = -1
 
-        # Calculate average magnitude for attention and MLP layers
-        attn_layers = [l for l in directions.keys() if "attn" in l]
-        mlp_layers = [l for l in directions.keys() if "mlp" in l]
+        # Run the main function
+        directions = main(args)
 
-        if attn_layers:
-            attn_avg = np.mean([layer_norms[l] for l in attn_layers])
-            print(f"Average attention layer magnitude: {attn_avg:.4f}")
+        # In notebook mode, let's examine the directions
+        if "ipykernel" in sys.modules and directions:
+            print("\nExtracted directions:")
+            print("-" * 50)
 
-        if mlp_layers:
-            mlp_avg = np.mean([layer_norms[l] for l in mlp_layers])
-            print(f"Average MLP layer magnitude: {mlp_avg:.4f}")
+            # Get layer names and their magnitude
+            layer_norms = {
+                layer: torch.norm(vec).item() for layer, vec in directions.items()
+            }
 
-# %% [markdown]
-# ## Next Steps
-#
-# Now that we've extracted the reasoning length direction vectors, we can use them to steer the model's reasoning.
-#
-# Continue to the next notebook: `steer_reasoning_length.py`
+            # Find the layer with the highest magnitude
+            max_layer = max(layer_norms.items(), key=lambda x: x[1])
+            print(
+                f"Layer with highest magnitude: {max_layer[0]} (norm: {max_layer[1]:.4f})"
+            )
+
+            # Calculate average magnitude for attention and MLP layers
+            attn_layers = [l for l in directions.keys() if "attn" in l]
+            mlp_layers = [l for l in directions.keys() if "mlp" in l]
+
+            if attn_layers:
+                attn_avg = np.mean([layer_norms[l] for l in attn_layers])
+                print(f"Average attention layer magnitude: {attn_avg:.4f}")
+
+            if mlp_layers:
+                mlp_avg = np.mean([layer_norms[l] for l in mlp_layers])
+                print(f"Average MLP layer magnitude: {mlp_avg:.4f}")
+    else:
+        print(f"Error: Responses file {responses_file} not found.")
+        print(f"Please run generate_responses_gsm8k.py first.")
