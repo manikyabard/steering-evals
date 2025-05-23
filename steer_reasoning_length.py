@@ -113,6 +113,12 @@ def parse_args():
         help="Top-k sampling parameter",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda:0" if torch.cuda.is_available() else "cpu",
+        help="Device to use for computation (e.g., cuda:0, cpu)",
+    )
     return parser.parse_args()
 
 
@@ -137,6 +143,7 @@ class NotebookArgs:
         self.top_p = 0.95  # Recommended for thinking mode
         self.top_k = 20  # Recommended for thinking mode
         self.seed = 42  # Random seed for reproducibility
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"  # Device to use
 
 
 # Use NotebookArgs when running as notebook, otherwise parse command line arguments
@@ -419,8 +426,9 @@ try:
     print(f"Loading model {args.model}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype="auto", device_map="auto"
+        args.model, torch_dtype="auto", device_map=args.device
     )
+    print(f"Using device: {args.device}")
 
     # Print model information
     print(f"Model loaded: {args.model}")
@@ -702,8 +710,9 @@ def main(args):
     print(f"Loading model {args.model}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype="auto", device_map="auto"
+        args.model, torch_dtype="auto", device_map=args.device
     )
+    print(f"Using device: {args.device}")
 
     # Load test data
     print(f"Loading test data...")
