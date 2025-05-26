@@ -385,6 +385,12 @@ def compute_reasoning_length_direction(
     # Sort by thinking length
     valid_responses.sort(key=lambda x: x["thinking_length"])
 
+    # Debug: Print thinking length distribution
+    thinking_lengths = [ex["thinking_length"] for ex in valid_responses]
+    print(f"Thinking length range: {min(thinking_lengths)} - {max(thinking_lengths)}")
+    print(f"Thinking length distribution (first 5): {thinking_lengths[:5]}")
+    print(f"Thinking length distribution (last 5): {thinking_lengths[-5:]}")
+
     # Select short thinking examples (bottom 20%)
     short_thinking_count = max(5, int(len(valid_responses) * 0.2))
     short_thinking_examples = valid_responses[:short_thinking_count]
@@ -395,6 +401,14 @@ def compute_reasoning_length_direction(
 
     print(f"Using {len(long_thinking_examples)} long thinking examples")
     print(f"Using {len(short_thinking_examples)} short thinking examples")
+    
+    # Debug: Show actual lengths
+    short_lengths = [ex["thinking_length"] for ex in short_thinking_examples]
+    long_lengths = [ex["thinking_length"] for ex in long_thinking_examples]
+    print(f"Short thinking lengths: {short_lengths}")
+    print(f"Long thinking lengths: {long_lengths}")
+    print(f"Average short length: {sum(short_lengths)/len(short_lengths):.1f}")
+    print(f"Average long length: {sum(long_lengths)/len(long_lengths):.1f}")
 
     # Limit the number of samples to process
     long_examples_to_process = min(len(long_thinking_examples), num_samples // 2)
@@ -511,6 +525,14 @@ def compute_reasoning_length_direction(
             diff = (
                 long_mean_activations[layer_name] - short_mean_activations[layer_name]
             )
+            
+            # Debug: Print direction statistics
+            if layer_name == list(long_mean_activations.keys())[0]:  # Print for first layer only
+                print(f"Debug for layer {layer_name}:")
+                print(f"Long activation mean: {long_mean_activations[layer_name].mean().item():.6f}")
+                print(f"Short activation mean: {short_mean_activations[layer_name].mean().item():.6f}")
+                print(f"Direction (long-short) mean: {diff.mean().item():.6f}")
+                print(f"Direction norm: {torch.norm(diff).item():.6f}")
 
             # Normalize the direction vector
             norm = torch.norm(diff)
@@ -525,6 +547,17 @@ def compute_reasoning_length_direction(
         torch.cuda.empty_cache()
 
     print(f"Extracted directions for {len(directions)} layers")
+    
+    # Additional debug: Check if we should invert the direction
+    # If the average thinking length difference is opposite to what we expect, we might need to invert
+    avg_short = sum(short_lengths) / len(short_lengths)
+    avg_long = sum(long_lengths) / len(long_lengths)
+    expected_diff = avg_long - avg_short
+    print(f"Expected difference (long - short): {expected_diff:.1f}")
+    if expected_diff < 0:
+        print("WARNING: Long examples are actually shorter than short examples!")
+        print("This might indicate an issue with example selection or direction computation.")
+    
     return directions
 
 
@@ -709,7 +742,9 @@ def main(args):
     for ex in responses:
         if "thinking_length" not in ex:
             if "with_thinking" in ex and "thinking" in ex["with_thinking"]:
-                ex["thinking_length"] = len(ex["with_thinking"]["thinking"])
+                # Use word count instead of character count for more reliable length measurement
+                thinking_text = ex["with_thinking"]["thinking"].strip()
+                ex["thinking_length"] = len(thinking_text.split()) if thinking_text else 0
             else:
                 ex["thinking_length"] = -1
 
@@ -833,7 +868,9 @@ if __name__ == "__main__" or "ipykernel" in sys.modules:
         # Add thinking_length field if not present
         for ex in responses:
             if "with_thinking" in ex and "thinking" in ex["with_thinking"]:
-                ex["thinking_length"] = len(ex["with_thinking"]["thinking"])
+                # Use word count instead of character count for more reliable length measurement
+                thinking_text = ex["with_thinking"]["thinking"].strip()
+                ex["thinking_length"] = len(thinking_text.split()) if thinking_text else 0
             else:
                 ex["thinking_length"] = -1
 

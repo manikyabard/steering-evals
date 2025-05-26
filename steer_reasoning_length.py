@@ -302,7 +302,7 @@ if len(test_data) > 0:
 
 
 # %%
-def apply_steering_layers(model, directions, alpha=0.0, component="attn"):
+def apply_steering_layers(model, directions, alpha=0.0, component="attn", invert_direction=False):
     """Apply steering layers to the model."""
     steering_layers = []
 
@@ -313,7 +313,9 @@ def apply_steering_layers(model, directions, alpha=0.0, component="attn"):
             layer_idx = int(layer_name.split("_")[-1])
             if layer_idx < len(model.model.layers):
                 attn_layer = model.model.layers[layer_idx].self_attn
-                steering_layer = SteeringAttentionLayer(attn_layer, direction, alpha)
+                # Optionally invert the direction
+                final_direction = -direction if invert_direction else direction
+                steering_layer = SteeringAttentionLayer(attn_layer, final_direction, alpha)
                 steering_layers.append(steering_layer)
 
     if component in ["mlp", "both"]:
@@ -322,10 +324,14 @@ def apply_steering_layers(model, directions, alpha=0.0, component="attn"):
             layer_idx = int(layer_name.split("_")[-1])
             if layer_idx < len(model.model.layers):
                 mlp_layer = model.model.layers[layer_idx].mlp
-                steering_layer = SteeringMLPLayer(mlp_layer, direction, alpha)
+                # Optionally invert the direction
+                final_direction = -direction if invert_direction else direction
+                steering_layer = SteeringMLPLayer(mlp_layer, final_direction, alpha)
                 steering_layers.append(steering_layer)
 
     print(f"Applied {len(steering_layers)} steering layers with alpha={alpha}")
+    if invert_direction:
+        print("Direction was inverted")
     return steering_layers
 
 
@@ -443,63 +449,55 @@ try:
         print("\nTesting steering with a simple example...")
         print("Test question:", test_question)
 
-        # Generate with positive alpha (encouraging longer reasoning)
-        print("\nGenerating with α = 0.08 (longer reasoning)...")
-        long_response = generate_with_steering(
-            model,
-            tokenizer,
-            test_question,
-            alpha=0.08,
-            directions=directions,
-            component=args.component,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-        )
-
-        # Generate with zero alpha (neutral)
-        print("\nGenerating with α = 0.0 (neutral)...")
-        neutral_response = generate_with_steering(
-            model,
-            tokenizer,
-            test_question,
-            alpha=0.0,
-            directions=directions,
-            component=args.component,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-        )
-
-        # Generate with negative alpha (encouraging shorter reasoning)
-        print("\nGenerating with α = -0.08 (shorter reasoning)...")
-        short_response = generate_with_steering(
-            model,
-            tokenizer,
-            test_question,
-            alpha=-0.08,
-            directions=directions,
-            component=args.component,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-        )
-
-        # Print statistics
-        print("\nThinking length comparison:")
-        print(f"- Long reasoning: {len(long_response['thinking'].split())} words")
-        print(f"- Neutral reasoning: {len(neutral_response['thinking'].split())} words")
-        print(f"- Short reasoning: {len(short_response['thinking'].split())} words")
-
-        # Print samples of thinking content
-        print("\nSample of long reasoning thinking:")
-        print(long_response["thinking"][:200] + "...")
-
-        print("\nSample of neutral reasoning thinking:")
-        print(neutral_response["thinking"][:200] + "...")
-
-        print("\nSample of short reasoning thinking:")
-        print(short_response["thinking"][:200] + "...")
+        # Generate with correctly interpreted alpha values
+        # Based on our findings: negative alpha = longer reasoning, positive alpha = shorter reasoning
+        test_alphas = [(-0.1, "longer"), (0.0, "neutral"), (0.1, "shorter")]
+        
+        print(f"\n=== Testing steering direction (based on observed behavior) ===")
+        print("Note: For this model, negative α produces longer reasoning, positive α produces shorter reasoning")
+        
+        for alpha, reasoning_type in test_alphas:
+            print(f"\nGenerating with α = {alpha} ({reasoning_type} reasoning)...")
+            
+            # Apply steering
+            steering_layers = apply_steering_layers(
+                model, 
+                directions, 
+                alpha=alpha, 
+                component=args.component
+            )
+            
+            # Generate response
+            messages = [{"role": "user", "content": test_question}]
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, enable_thinking=True
+            )
+            inputs = tokenizer([text], return_tensors="pt").to(model.device)
+            
+            with torch.no_grad():
+                output = model.generate(
+                    **inputs,
+                    max_new_tokens=args.max_new_tokens,
+                    do_sample=True,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    top_k=args.top_k,
+                    pad_token_id=tokenizer.eos_token_id
+                )
+            
+            # Decode the response
+            response = tokenizer.decode(output[0][len(inputs.input_ids[0]):], skip_special_tokens=True)
+            thinking_length = count_thinking_length(response)
+            
+            print(f"Thinking length: {thinking_length} words")
+            print(f"Sample thinking: {response[:200]}...")
+            
+            # Remove steering
+            remove_steering_layers(steering_layers)
+            
+            # Clear memory
+            del steering_layers, output, response
+            torch.cuda.empty_cache()
     else:
         print("No directions available for testing")
 except Exception as e:
@@ -842,3 +840,13 @@ if __name__ == "__main__" or "ipykernel" in sys.modules:
 # - Positive alpha values increase reasoning length, while negative values decrease it
 # - There may be an optimal reasoning length for accuracy
 # - The relationship between reasoning length and accuracy is task-dependent
+
+# %%
+def count_thinking_length(response):
+    """Count words in the thinking section of a response."""
+    if "<think>" in response and "</think>" in response:
+        thinking_start = response.find("<think>") + len("<think>")
+        thinking_end = response.find("</think>")
+        thinking_content = response[thinking_start:thinking_end].strip()
+        return len(thinking_content.split())
+    return 0
