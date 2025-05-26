@@ -313,8 +313,8 @@ def apply_steering_layers(model, directions, alpha=0.0, component="attn", invert
             layer_idx = int(layer_name.split("_")[-1])
             if layer_idx < len(model.model.layers):
                 attn_layer = model.model.layers[layer_idx].self_attn
-                # Optionally invert the direction
-                final_direction = -direction if invert_direction else direction
+                # Optionally invert the direction and move to model device
+                final_direction = (-direction if invert_direction else direction).to(model.device)
                 steering_layer = SteeringAttentionLayer(attn_layer, final_direction, alpha)
                 steering_layers.append(steering_layer)
 
@@ -324,8 +324,8 @@ def apply_steering_layers(model, directions, alpha=0.0, component="attn", invert
             layer_idx = int(layer_name.split("_")[-1])
             if layer_idx < len(model.model.layers):
                 mlp_layer = model.model.layers[layer_idx].mlp
-                # Optionally invert the direction
-                final_direction = -direction if invert_direction else direction
+                # Optionally invert the direction and move to model device
+                final_direction = (-direction if invert_direction else direction).to(model.device)
                 steering_layer = SteeringMLPLayer(mlp_layer, final_direction, alpha)
                 steering_layers.append(steering_layer)
 
