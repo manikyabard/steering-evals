@@ -282,7 +282,13 @@ def extract_directions(model, tokenizer, short_examples, long_examples, componen
     for i, example in enumerate(tqdm(long_examples)):
         try:
             question = example["question"]
-            thinking = example["with_thinking"]["thinking"]
+            # Handle both formats: direct 'thinking' field or nested 'with_thinking'
+            if "thinking" in example and example["thinking"]:
+                thinking = example["thinking"]
+            elif "with_thinking" in example and "thinking" in example["with_thinking"]:
+                thinking = example["with_thinking"]["thinking"]
+            else:
+                continue  # Skip if no thinking found
             
             # Get activations
             activations = get_activations_for_example(model, tokenizer, extractor, question, thinking)
