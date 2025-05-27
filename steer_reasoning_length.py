@@ -172,7 +172,8 @@ else:
 # Check if directions file exists
 model_short_name = args.model.split("/")[-1]
 directions_file = os.path.join(
-    args.directions_dir, f"{model_short_name}_reasoning_length_directions.pt"
+    args.directions_dir,
+    f"{model_short_name}_thinking_length_direction_gsm8k_{args.component}.pt",
 )
 
 if os.path.exists(directions_file):
@@ -302,45 +303,53 @@ if len(test_data) > 0:
 
 
 # %%
-def apply_steering_layers(model, directions, alpha=0.0, component="attn", invert_direction=False):
-    """Apply steering layers to the model."""
-    steering_layers = []
+def apply_steering_layers(model, directions, alpha=0.0, component="attn"):
+    """Apply steering layers to the model - ThinkEdit style."""
 
-    # Apply steering to selected components
-    if component in ["attn", "both"]:
-        attn_directions = {k: v for k, v in directions.items() if "attn" in k}
-        for layer_name, direction in attn_directions.items():
-            layer_idx = int(layer_name.split("_")[-1])
-            if layer_idx < len(model.model.layers):
-                attn_layer = model.model.layers[layer_idx].self_attn
-                # Optionally invert the direction and move to model device
-                final_direction = (-direction if invert_direction else direction).to(model.device)
-                steering_layer = SteeringAttentionLayer(attn_layer, final_direction, alpha)
-                steering_layers.append(steering_layer)
+    # directions is now a tensor [num_layers, hidden_size]
+    if component == "attn":
 
-    if component in ["mlp", "both"]:
-        mlp_directions = {k: v for k, v in directions.items() if "mlp" in k}
-        for layer_name, direction in mlp_directions.items():
-            layer_idx = int(layer_name.split("_")[-1])
-            if layer_idx < len(model.model.layers):
-                mlp_layer = model.model.layers[layer_idx].mlp
-                # Optionally invert the direction and move to model device
-                final_direction = (-direction if invert_direction else direction).to(model.device)
-                steering_layer = SteeringMLPLayer(mlp_layer, final_direction, alpha)
-                steering_layers.append(steering_layer)
+        def adjust_residual_hook(layer_idx):
+            def hook_fn(module, input, output):
+                return (
+                    output[0] + alpha * directions[layer_idx].to(model.device),
+                ) + output[1:]
 
-    print(f"Applied {len(steering_layers)} steering layers with alpha={alpha}")
-    if invert_direction:
-        print("Direction was inverted")
-    return steering_layers
+            return hook_fn
+
+        print("add attn hook")
+        hooks = []
+        for i, layer in enumerate(model.model.layers):
+            if i < len(directions):
+                hook = layer.self_attn.register_forward_hook(adjust_residual_hook(i))
+                hooks.append(hook)
+        return hooks
+
+    elif component == "mlp":
+
+        def adjust_residual_hook(layer_idx):
+            def hook_fn(module, input, output):
+                return output + alpha * directions[layer_idx].to(model.device)
+
+            return hook_fn
+
+        print("add mlp hook")
+        hooks = []
+        for i, layer in enumerate(model.model.layers):
+            if i < len(directions):
+                hook = layer.mlp.register_forward_hook(adjust_residual_hook(i))
+                hooks.append(hook)
+        return hooks
+
+    else:
+        raise ValueError(f"Unsupported component: {component}")
 
 
-# %%
-def remove_steering_layers(steering_layers):
-    """Remove steering layers from the model."""
-    for layer in steering_layers:
-        layer.restore_original()
-    print(f"Removed {len(steering_layers)} steering layers")
+def remove_steering_layers(hooks):
+    """Remove steering hooks from the model."""
+    for hook in hooks:
+        hook.remove()
+    print(f"Removed {len(hooks)} steering hooks")
 
 
 # %%
@@ -374,7 +383,7 @@ def generate_with_steering(
     inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
     # Apply steering
-    steering_layers = apply_steering_layers(model, directions, alpha, component)
+    hooks = apply_steering_layers(model, directions, alpha, component)
 
     # Generate with steering applied
     with torch.no_grad():
@@ -387,8 +396,8 @@ def generate_with_steering(
             top_k=top_k,
         )
 
-    # Remove steering layers
-    remove_steering_layers(steering_layers)
+    # Remove steering hooks
+    remove_steering_layers(hooks)
 
     # Process the output
     output_ids = generated_ids[0][len(inputs.input_ids[0]) :].tolist()
@@ -452,28 +461,30 @@ try:
         # Generate with correctly interpreted alpha values
         # Based on our findings: negative alpha = longer reasoning, positive alpha = shorter reasoning
         test_alphas = [(-0.1, "longer"), (0.0, "neutral"), (0.1, "shorter")]
-        
+
         print(f"\n=== Testing steering direction (based on observed behavior) ===")
-        print("Note: For this model, negative α produces longer reasoning, positive α produces shorter reasoning")
-        
+        print(
+            "Note: For this model, negative α produces longer reasoning, positive α produces shorter reasoning"
+        )
+
         for alpha, reasoning_type in test_alphas:
             print(f"\nGenerating with α = {alpha} ({reasoning_type} reasoning)...")
-            
+
             # Apply steering
-            steering_layers = apply_steering_layers(
-                model, 
-                directions, 
-                alpha=alpha, 
-                component=args.component
+            hooks = apply_steering_layers(
+                model, directions, alpha=alpha, component=args.component
             )
-            
+
             # Generate response
             messages = [{"role": "user", "content": test_question}]
             text = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=True
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=True,
             )
             inputs = tokenizer([text], return_tensors="pt").to(model.device)
-            
+
             with torch.no_grad():
                 output = model.generate(
                     **inputs,
@@ -482,21 +493,23 @@ try:
                     temperature=args.temperature,
                     top_p=args.top_p,
                     top_k=args.top_k,
-                    pad_token_id=tokenizer.eos_token_id
+                    pad_token_id=tokenizer.eos_token_id,
                 )
-            
+
             # Decode the response
-            response = tokenizer.decode(output[0][len(inputs.input_ids[0]):], skip_special_tokens=True)
+            response = tokenizer.decode(
+                output[0][len(inputs.input_ids[0]) :], skip_special_tokens=True
+            )
             thinking_length = count_thinking_length(response)
-            
+
             print(f"Thinking length: {thinking_length} words")
             print(f"Sample thinking: {response[:200]}...")
-            
+
             # Remove steering
-            remove_steering_layers(steering_layers)
-            
+            remove_steering_layers(hooks)
+
             # Clear memory
-            del steering_layers, output, response
+            del hooks, output, response
             torch.cuda.empty_cache()
     else:
         print("No directions available for testing")
@@ -688,7 +701,8 @@ def visualize_results(results, output_dir):
 def main(args):
     model_short_name = args.model.split("/")[-1]
     directions_file = os.path.join(
-        args.directions_dir, f"{model_short_name}_reasoning_length_directions.pt"
+        args.directions_dir,
+        f"{model_short_name}_thinking_length_direction_gsm8k_{args.component}.pt",
     )
 
     # Check if directions file exists
@@ -840,6 +854,7 @@ if __name__ == "__main__" or "ipykernel" in sys.modules:
 # - Positive alpha values increase reasoning length, while negative values decrease it
 # - There may be an optimal reasoning length for accuracy
 # - The relationship between reasoning length and accuracy is task-dependent
+
 
 # %%
 def count_thinking_length(response):
