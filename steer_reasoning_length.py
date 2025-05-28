@@ -67,6 +67,12 @@ def parse_args():
         help="Directory with saved direction vectors",
     )
     parser.add_argument(
+        "--directions_file",
+        type=str,
+        default=None,
+        help="Direct path to directions file (overrides directions_dir and auto-naming)",
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         default="steering_results",
@@ -156,6 +162,9 @@ class NotebookArgs:
     def __init__(self):
         self.model = "Qwen/Qwen3-0.6B"  # Model name
         self.directions_dir = "directions"  # Directory with saved directions
+        self.directions_file = (
+            None  # Direct path to directions file (overrides auto-naming)
+        )
         self.output_dir = "steering_results"  # Directory to save results
         self.num_samples = 3  # Use a small number for quick testing
         self.direction_weights = [-0.08, 0.0, 0.08]  # Alpha values to test
@@ -185,6 +194,10 @@ if "ipykernel" in sys.modules:
     print(f"- Temperature: {args.temperature}")
     print(f"- Top-p: {args.top_p}")
     print(f"- Top-k: {args.top_k}")
+    if args.directions_file:
+        print(f"- Directions file: {args.directions_file}")
+    else:
+        print(f"- Directions directory: {args.directions_dir}")
 else:
     args = parse_args()
     print("Running in script mode with parsed arguments")
@@ -197,10 +210,15 @@ else:
 # %%
 # Check if directions file exists
 model_short_name = args.model.split("/")[-1]
-directions_file = os.path.join(
-    args.directions_dir,
-    f"{model_short_name}_thinking_length_direction_gsm8k_{args.component}.pt",
-)
+
+# Use direct directions file if specified, otherwise construct from model name and component
+if args.directions_file:
+    directions_file = args.directions_file
+else:
+    directions_file = os.path.join(
+        args.directions_dir,
+        f"{model_short_name}_thinking_length_direction_gsm8k_{args.component}.pt",
+    )
 
 if os.path.exists(directions_file):
     print(f"Found directions file: {directions_file}")
@@ -727,10 +745,15 @@ def main(args):
     logger = setup_logging("steer_reasoning_length")
 
     model_short_name = args.model.split("/")[-1]
-    directions_file = os.path.join(
-        args.directions_dir,
-        f"{model_short_name}_thinking_length_direction_gsm8k_{args.component}.pt",
-    )
+
+    # Use direct directions file if specified, otherwise construct from model name and component
+    if args.directions_file:
+        directions_file = args.directions_file
+    else:
+        directions_file = os.path.join(
+            args.directions_dir,
+            f"{model_short_name}_thinking_length_direction_gsm8k_{args.component}.pt",
+        )
 
     # Check if directions file exists
     if not os.path.exists(directions_file):
@@ -1075,10 +1098,15 @@ def memory_efficient_main(args):
     logger = setup_logging("steer_reasoning_length_efficient")
 
     model_short_name = args.model.split("/")[-1]
-    directions_file = os.path.join(
-        args.directions_dir,
-        f"{model_short_name}_thinking_length_direction_gsm8k_{args.component}.pt",
-    )
+
+    # Use direct directions file if specified, otherwise construct from model name and component
+    if args.directions_file:
+        directions_file = args.directions_file
+    else:
+        directions_file = os.path.join(
+            args.directions_dir,
+            f"{model_short_name}_thinking_length_direction_gsm8k_{args.component}.pt",
+        )
 
     # Check if directions file exists
     if not os.path.exists(directions_file):
