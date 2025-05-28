@@ -85,7 +85,7 @@ def count_thinking_tokens(thinking_text, tokenizer):
     return len(tokens)
 
 
-def compute_thinking_lengths(responses):
+def compute_thinking_lengths(responses, tokenizer):
     """Compute thinking lengths for all responses."""
     print("Computing thinking lengths...")
 
@@ -93,10 +93,10 @@ def compute_thinking_lengths(responses):
         # Handle both formats: direct 'thinking' field or nested 'with_thinking'
         if "thinking" in item and item["thinking"]:
             thinking_text = item["thinking"]
-            item["thinking_length"] = count_thinking_words(thinking_text)
+            item["thinking_length"] = count_thinking_tokens(thinking_text, tokenizer)
         elif "with_thinking" in item and "thinking" in item["with_thinking"]:
             thinking_text = item["with_thinking"]["thinking"]
-            item["thinking_length"] = count_thinking_words(thinking_text)
+            item["thinking_length"] = count_thinking_tokens(thinking_text, tokenizer)
         else:
             item["thinking_length"] = -1  # Invalid/missing thinking
 
@@ -445,25 +445,25 @@ def main():
         responses = json.load(f)
     print(f"Loaded {len(responses)} responses")
 
-    # Compute thinking lengths if needed
-    if args.recompute_lengths or not any(
-        "thinking_length" in item for item in responses
-    ):
-        print("Computing thinking lengths...")
-        responses = compute_thinking_lengths(responses)
-
-    # Select examples
-    short_examples, long_examples = select_examples_by_length(
-        responses, args.n_short, args.n_long
-    )
-
-    # Load model
+    # Load model first to get tokenizer for length computation
     print(f"\nLoading model: {args.model}")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype="auto", device_map=args.device
     )
     model.eval()
+
+    # Compute thinking lengths if needed
+    if args.recompute_lengths or not any(
+        "thinking_length" in item for item in responses
+    ):
+        print("Computing thinking lengths...")
+        responses = compute_thinking_lengths(responses, tokenizer)
+
+    # Select examples
+    short_examples, long_examples = select_examples_by_length(
+        responses, args.n_short, args.n_long
+    )
 
     # Extract directions
     if args.component == "both":
