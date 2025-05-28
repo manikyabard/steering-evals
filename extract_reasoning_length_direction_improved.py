@@ -64,7 +64,11 @@ def parse_args():
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda:0" if torch.cuda.is_available() else "cpu",
+        default=(
+            "cuda:0"
+            if torch.cuda.is_available()
+            else "mps" if torch.backends.mps.is_available() else "cpu"
+        ),
         help="Device to use for computation",
     )
     parser.add_argument(
@@ -148,6 +152,12 @@ def select_examples_by_length(responses, n_short=100, n_long=100):
             f"Warning: Only {len(long_examples)} long examples available, requested {n_long}"
         )
 
+    # Ensure we have at least some examples
+    if len(short_examples) == 0 or len(long_examples) == 0:
+        raise ValueError(
+            f"Insufficient examples: {len(short_examples)} short, {len(long_examples)} long. Need at least 1 of each."
+        )
+
     # Print selected examples stats
     if short_examples:
         short_lengths = [item["thinking_length"] for item in short_examples]
@@ -215,8 +225,8 @@ def get_activations_for_example(model, tokenizer, extractor, question, thinking)
     if extractor.component == "attn":
         # ThinkEdit attention approach: use hooks on post_attention_layernorm
         # Create the prompt in ThinkEdit format with Unicode characters
-        prompt_start = f"<|User|>{question}<|Assistant|>"
-        prompt_full = f"<|User|>{question}<|Assistant|>{thinking}"
+        prompt_start = f"<｜User｜>{question}<｜Assistant｜>"
+        prompt_full = f"<｜User｜>{question}<｜Assistant｜>{thinking}"
 
         # Get token positions
         toks_start = tokenizer(prompt_start).input_ids
@@ -250,8 +260,8 @@ def get_activations_for_example(model, tokenizer, extractor, question, thinking)
 
     elif extractor.component == "mlp":
         # ThinkEdit MLP approach: use output_hidden_states
-        prompt_start = f"<|User|>{question}<|Assistant|>"
-        prompt_full = f"<|User|>{question}<|Assistant|>{thinking}"
+        prompt_start = f"<｜User｜>{question}<｜Assistant｜>"
+        prompt_full = f"<｜User｜>{question}<｜Assistant｜>{thinking}"
 
         # Get token positions
         toks_start = tokenizer(prompt_start).input_ids
@@ -354,6 +364,20 @@ def extract_directions(
 
     # Compute mean activations and directions - ThinkEdit style
     print("Computing direction vectors...")
+
+    # Check if we have sufficient examples
+    if len(short_activations) == 0:
+        raise ValueError(
+            "No short thinking examples processed successfully. Cannot compute direction."
+        )
+    if len(long_activations) == 0:
+        raise ValueError(
+            "No long thinking examples processed successfully. Cannot compute direction."
+        )
+
+    print(
+        f"Successfully processed {len(short_activations)} short and {len(long_activations)} long examples"
+    )
 
     # Stack all examples: [num_examples, num_layers, hidden_size]
     short_stack = torch.stack(short_activations, dim=0)

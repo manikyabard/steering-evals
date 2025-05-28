@@ -179,15 +179,11 @@ directions_file = os.path.join(
 if os.path.exists(directions_file):
     print(f"Found directions file: {directions_file}")
     try:
-        # Load directions
+        # Load directions - now a tensor [num_layers, hidden_size]
         directions = torch.load(directions_file)
-        print(f"Loaded directions for {len(directions)} layers")
-
-        # Print some basic stats
-        attn_layers = [l for l in directions.keys() if "attn" in l]
-        mlp_layers = [l for l in directions.keys() if "mlp" in l]
-        print(f"Attention layers: {len(attn_layers)}")
-        print(f"MLP layers: {len(mlp_layers)}")
+        print(f"Loaded directions tensor with shape: {directions.shape}")
+        print(f"Number of layers: {directions.shape[0]}")
+        print(f"Hidden size: {directions.shape[1]}")
     except Exception as e:
         print(f"Error loading directions: {e}")
         print("Will need to run extract_reasoning_length_direction.py first")
