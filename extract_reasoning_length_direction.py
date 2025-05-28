@@ -29,6 +29,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from logging_setup import setup_logging, get_logger
 
 # Display installed versions
 import sys
@@ -360,13 +361,15 @@ def get_activations_for_text(model, tokenizer, activation_extractor, text):
             # Activations are collected through hooks
 
     # Create a copy of activations
-    activations_copy = {k: v.clone() for k, v in activation_extractor.activations.items()}
-    
+    activations_copy = {
+        k: v.clone() for k, v in activation_extractor.activations.items()
+    }
+
     # Clear inputs to free memory
     del inputs
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        
+
     return activations_copy
 
 
@@ -401,7 +404,7 @@ def compute_reasoning_length_direction(
 
     print(f"Using {len(long_thinking_examples)} long thinking examples")
     print(f"Using {len(short_thinking_examples)} short thinking examples")
-    
+
     # Debug: Show actual lengths
     short_lengths = [ex["thinking_length"] for ex in short_thinking_examples]
     long_lengths = [ex["thinking_length"] for ex in long_thinking_examples]
@@ -449,7 +452,7 @@ def compute_reasoning_length_direction(
             # Extract just the thinking section and average across tokens (similar to reference file approach)
             mean_activation = layer_activation[:, start - 1 : end - 1, :].mean(dim=1)
             long_thinking_activations[layer_name].append(mean_activation)
-            
+
         # Clean up to free memory
         del activations, prompt, toks, toks_full
         if idx % 10 == 0 and torch.cuda.is_available():
@@ -486,7 +489,7 @@ def compute_reasoning_length_direction(
             # Extract just the thinking section and average across tokens
             mean_activation = layer_activation[:, start - 1 : end - 1, :].mean(dim=1)
             short_thinking_activations[layer_name].append(mean_activation)
-            
+
         # Clean up to free memory
         del activations, prompt, toks, toks_full
         if idx % 10 == 0 and torch.cuda.is_available():
@@ -511,7 +514,7 @@ def compute_reasoning_length_direction(
                 short_mean_activations[layer_name] = torch.mean(stacked_short, dim=0)
                 # Free memory
                 del stacked_short
-                
+
     # Free memory of the activation lists
     del long_thinking_activations, short_thinking_activations
     if torch.cuda.is_available():
@@ -525,12 +528,18 @@ def compute_reasoning_length_direction(
             diff = (
                 long_mean_activations[layer_name] - short_mean_activations[layer_name]
             )
-            
+
             # Debug: Print direction statistics
-            if layer_name == list(long_mean_activations.keys())[0]:  # Print for first layer only
+            if (
+                layer_name == list(long_mean_activations.keys())[0]
+            ):  # Print for first layer only
                 print(f"Debug for layer {layer_name}:")
-                print(f"Long activation mean: {long_mean_activations[layer_name].mean().item():.6f}")
-                print(f"Short activation mean: {short_mean_activations[layer_name].mean().item():.6f}")
+                print(
+                    f"Long activation mean: {long_mean_activations[layer_name].mean().item():.6f}"
+                )
+                print(
+                    f"Short activation mean: {short_mean_activations[layer_name].mean().item():.6f}"
+                )
                 print(f"Direction (long-short) mean: {diff.mean().item():.6f}")
                 print(f"Direction norm: {torch.norm(diff).item():.6f}")
 
@@ -540,14 +549,14 @@ def compute_reasoning_length_direction(
                 directions[layer_name] = diff / norm
             else:
                 directions[layer_name] = diff
-                
+
     # Free memory
     del long_mean_activations, short_mean_activations
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     print(f"Extracted directions for {len(directions)} layers")
-    
+
     # Additional debug: Check if we should invert the direction
     # If the average thinking length difference is opposite to what we expect, we might need to invert
     avg_short = sum(short_lengths) / len(short_lengths)
@@ -556,8 +565,10 @@ def compute_reasoning_length_direction(
     print(f"Expected difference (long - short): {expected_diff:.1f}")
     if expected_diff < 0:
         print("WARNING: Long examples are actually shorter than short examples!")
-        print("This might indicate an issue with example selection or direction computation.")
-    
+        print(
+            "This might indicate an issue with example selection or direction computation."
+        )
+
     return directions
 
 
@@ -594,7 +605,7 @@ try:
             print(f"Shape: {layer_activation.shape}")
             print(f"Mean: {layer_activation.mean().item():.4f}")
             print(f"Std: {layer_activation.std().item():.4f}")
-            
+
         # Clean up
         del activations
         if torch.cuda.is_available():
@@ -704,7 +715,7 @@ try:
         # Visualize the test directions
         if test_directions:
             visualize_directions(test_directions, ".", args.model)
-            
+
         # Clean up
         del test_directions
         if torch.cuda.is_available():
@@ -722,6 +733,9 @@ except Exception as e:
 
 # %%
 def main(args):
+    # Setup logging
+    logger = setup_logging("extract_reasoning_length_direction")
+
     model_short_name = args.model.split("/")[-1]
     responses_file = os.path.join(
         args.responses_dir, f"{model_short_name}_gsm8k_responses.json"
@@ -729,14 +743,15 @@ def main(args):
 
     # Check if responses file exists
     if not os.path.exists(responses_file):
-        print(f"Error: Responses file {responses_file} not found.")
-        print(f"Please run generate_responses_gsm8k.py first.")
+        logger.error(f"Responses file {responses_file} not found.")
+        logger.error(f"Please run generate_responses_gsm8k.py first.")
         return None
 
     # Load responses
-    print(f"Loading responses from {responses_file}...")
+    logger.info(f"Loading responses from {responses_file}...")
     with open(responses_file, "r") as f:
         responses = json.load(f)
+    logger.info(f"Loaded {len(responses)} responses")
 
     # Make sure thinking_length is set for all examples
     for ex in responses:
@@ -744,22 +759,25 @@ def main(args):
             if "with_thinking" in ex and "thinking" in ex["with_thinking"]:
                 # Use word count instead of character count for more reliable length measurement
                 thinking_text = ex["with_thinking"]["thinking"].strip()
-                ex["thinking_length"] = len(thinking_text.split()) if thinking_text else 0
+                ex["thinking_length"] = (
+                    len(thinking_text.split()) if thinking_text else 0
+                )
             else:
                 ex["thinking_length"] = -1
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+    logger.info(f"Output directory: {args.output_dir}")
 
     # Load model and tokenizer
-    print(f"Loading model {args.model}...")
+    logger.info(f"Loading model {args.model}...")
     tokenizer = AutoTokenizer.from_pretrained(
         args.model, trust_remote_code=True, use_fast=False
     )
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype="auto", device_map=args.device
     )
-    print(f"Using device: {args.device}")
+    logger.info(f"Using device: {args.device}")
 
     # Set pad token if needed
     if tokenizer.pad_token is None:
@@ -769,7 +787,7 @@ def main(args):
     directions = {}
 
     # Extract attention-based direction
-    print("Extracting attention-based reasoning length direction...")
+    logger.info("Extracting attention-based reasoning length direction...")
     attn_extractor = ActivationExtractor(model, extraction_type="attention")
     attn_directions = compute_reasoning_length_direction(
         model, tokenizer, responses, attn_extractor, args.num_samples
@@ -783,7 +801,7 @@ def main(args):
             f"{model_short_name}_reasoning_length_direction_gsm8k_attn.pt",
         )
         torch.save(attn_directions, attn_output_file)
-        print(f"Attention-based directions saved to {attn_output_file}")
+        logger.info(f"Attention-based directions saved to {attn_output_file}")
 
         # Visualize attention-based directions
         visualize_directions(
@@ -791,14 +809,14 @@ def main(args):
         )
 
         directions.update(attn_directions)
-        
+
         # Free memory
         del attn_directions
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     # Extract MLP-based direction
-    print("Extracting MLP-based reasoning length direction...")
+    logger.info("Extracting MLP-based reasoning length direction...")
     mlp_extractor = ActivationExtractor(model, extraction_type="mlp")
     mlp_directions = compute_reasoning_length_direction(
         model, tokenizer, responses, mlp_extractor, args.num_samples
@@ -812,13 +830,13 @@ def main(args):
             f"{model_short_name}_reasoning_length_direction_gsm8k_mlp.pt",
         )
         torch.save(mlp_directions, mlp_output_file)
-        print(f"MLP-based directions saved to {mlp_output_file}")
+        logger.info(f"MLP-based directions saved to {mlp_output_file}")
 
         # Visualize MLP-based directions
         visualize_directions(mlp_directions, args.output_dir, f"{args.model} (MLP)")
 
         directions.update(mlp_directions)
-        
+
         # Free memory
         del mlp_directions
         if torch.cuda.is_available():
@@ -830,9 +848,9 @@ def main(args):
             args.output_dir, f"{model_short_name}_reasoning_length_directions.pt"
         )
         torch.save(directions, combined_output_file)
-        print(f"Combined directions saved to {combined_output_file}")
+        logger.info(f"Combined directions saved to {combined_output_file}")
 
-    print("Direction extraction complete!")
+    logger.info("Direction extraction complete!")
     return directions
 
 
@@ -870,7 +888,9 @@ if __name__ == "__main__" or "ipykernel" in sys.modules:
             if "with_thinking" in ex and "thinking" in ex["with_thinking"]:
                 # Use word count instead of character count for more reliable length measurement
                 thinking_text = ex["with_thinking"]["thinking"].strip()
-                ex["thinking_length"] = len(thinking_text.split()) if thinking_text else 0
+                ex["thinking_length"] = (
+                    len(thinking_text.split()) if thinking_text else 0
+                )
             else:
                 ex["thinking_length"] = -1
 
@@ -904,7 +924,7 @@ if __name__ == "__main__" or "ipykernel" in sys.modules:
             if mlp_layers:
                 mlp_avg = np.mean([layer_norms[l] for l in mlp_layers])
                 print(f"Average MLP layer magnitude: {mlp_avg:.4f}")
-                
+
             # Free memory
             del directions, layer_norms
             if torch.cuda.is_available():

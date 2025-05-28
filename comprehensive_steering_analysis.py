@@ -15,6 +15,8 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
+from logging_setup import setup_logging, get_logger
+
 
 def count_thinking_length(response):
     """Count words in thinking text."""
@@ -22,19 +24,20 @@ def count_thinking_length(response):
         thinking_text = response["thinking"]
     else:
         thinking_text = str(response)
-    
+
     if not thinking_text or thinking_text.strip() == "":
         return 0
-    
+
     # Split by whitespace and count non-empty tokens
     words = thinking_text.strip().split()
     meaningful_words = [w for w in words if len(w.strip()) > 0]
     return len(meaningful_words)
 
+
 def apply_steering_layers(model, directions, alpha=0.0, component="attn"):
     """Apply steering layers to the model - simplified version."""
     from steer_reasoning_length import SteeringAttentionLayer, SteeringMLPLayer
-    
+
     steering_layers = []
 
     # Apply steering to attention layers
@@ -58,12 +61,16 @@ def apply_steering_layers(model, directions, alpha=0.0, component="attn"):
 
     return steering_layers
 
+
 def remove_steering_layers(steering_layers):
     """Remove steering layers from the model."""
     for layer in steering_layers:
         layer.restore_original()
 
-def generate_with_steering(model, tokenizer, question, alpha=0.0, directions=None, component="attn"):
+
+def generate_with_steering(
+    model, tokenizer, question, alpha=0.0, directions=None, component="attn"
+):
     """Generate a response with steering applied."""
     if directions is None:
         raise ValueError("Directions must be provided for steering")
@@ -126,233 +133,297 @@ def generate_with_steering(model, tokenizer, question, alpha=0.0, directions=Non
     content = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
     return {"thinking": "", "response": content}
 
+
 def test_alpha_range():
     """Test a comprehensive range of alpha values."""
-    
+
     # Comprehensive alpha values to test
     alpha_values = [
-        -0.12, -0.10, -0.08, -0.06, -0.04, -0.02, 
-        0.0, 
-        0.02, 0.04, 0.06, 0.08, 0.10, 0.12
+        -0.12,
+        -0.10,
+        -0.08,
+        -0.06,
+        -0.04,
+        -0.02,
+        0.0,
+        0.02,
+        0.04,
+        0.06,
+        0.08,
+        0.10,
+        0.12,
     ]
-    
+
     # Test question from GSM8K
     test_question = "Darrell and Allen's ages are in the ratio of 7:11. If their total age now is 162, calculate Allen's age 10 years from now."
-    
+
     # Setup
     model_name = "Qwen/Qwen3-0.6B"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     direction_file = "directions/Qwen3-0.6B_reasoning_length_direction_gsm8k_attn.pt"
-    
-    print("Loading model and directions...")
+
+    logger = get_logger()
+    logger.info("Loading model and directions...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype="auto", device_map=device
     )
-    
+
     if not os.path.exists(direction_file):
-        print(f"Direction file not found: {direction_file}")
-        print("Please run direction extraction first.")
+        logger.error(f"Direction file not found: {direction_file}")
+        logger.error("Please run direction extraction first.")
         return []
-    
+
     directions = torch.load(direction_file, map_location=device)
-    print(f"Loaded directions for {len(directions)} layers")
-    
+    logger.info(f"Loaded directions for {len(directions)} layers")
+
     # Results storage
     results = []
-    
+
     print(f"\nTesting {len(alpha_values)} alpha values...")
-    
+
     for alpha in tqdm(alpha_values, desc="Testing alphas"):
         try:
             # Generate response with steering
             response = generate_with_steering(
-                model, tokenizer, test_question, 
-                alpha=alpha, directions=directions, component="attn"
+                model,
+                tokenizer,
+                test_question,
+                alpha=alpha,
+                directions=directions,
+                component="attn",
             )
-            
+
             # Count thinking words
             thinking_words = count_thinking_length(response)
-            
+
             # Store result
             result = {
                 "alpha": alpha,
                 "thinking_words": thinking_words,
-                "full_response": response
+                "full_response": response,
             }
             results.append(result)
-            
+
             print(f"α = {alpha:5.2f}: {thinking_words:4d} words")
-            
+
         except Exception as e:
             print(f"Error with alpha {alpha}: {e}")
             continue
-        
+
         # Cleanup CUDA memory
         torch.cuda.empty_cache()
-    
+
     return results
+
 
 def analyze_results(results):
     """Analyze the comprehensive results."""
-    
+
     alphas = [r["alpha"] for r in results]
     word_counts = [r["thinking_words"] for r in results]
-    
-    print("\n" + "="*60)
+
+    print("\n" + "=" * 60)
     print("COMPREHENSIVE STEERING ANALYSIS RESULTS")
-    print("="*60)
-    
+    print("=" * 60)
+
     # Print table
     print("\n| Alpha  | Thinking Words | Change from Baseline |")
     print("|--------|----------------|---------------------|")
-    
+
     baseline_idx = next(i for i, r in enumerate(results) if r["alpha"] == 0.0)
     baseline_words = results[baseline_idx]["thinking_words"]
-    
+
     for result in results:
         alpha = result["alpha"]
         words = result["thinking_words"]
         change = words - baseline_words
         change_sign = "+" if change > 0 else ""
         print(f"| {alpha:6.2f} | {words:13d} | {change_sign}{change:18d} |")
-    
+
     # Statistical analysis
     print(f"\nStatistical Analysis:")
     print(f"Baseline (α=0.0): {baseline_words} words")
     print(f"Range: {min(word_counts)} - {max(word_counts)} words")
     print(f"Standard deviation: {np.std(word_counts):.1f} words")
-    
+
     # Find patterns
-    negative_alphas = [(r["alpha"], r["thinking_words"]) for r in results if r["alpha"] < 0]
-    positive_alphas = [(r["alpha"], r["thinking_words"]) for r in results if r["alpha"] > 0]
-    
+    negative_alphas = [
+        (r["alpha"], r["thinking_words"]) for r in results if r["alpha"] < 0
+    ]
+    positive_alphas = [
+        (r["alpha"], r["thinking_words"]) for r in results if r["alpha"] > 0
+    ]
+
     print(f"\nPattern Analysis:")
-    print(f"Negative α range: {min(w for _, w in negative_alphas)} - {max(w for _, w in negative_alphas)} words")
-    print(f"Positive α range: {min(w for _, w in positive_alphas)} - {max(w for _, w in positive_alphas)} words")
-    
+    print(
+        f"Negative α range: {min(w for _, w in negative_alphas)} - {max(w for _, w in negative_alphas)} words"
+    )
+    print(
+        f"Positive α range: {min(w for _, w in positive_alphas)} - {max(w for _, w in positive_alphas)} words"
+    )
+
     # Check for U-shape or other patterns
     abs_alphas = [abs(alpha) for alpha in alphas]
-    
+
     # Correlation between |alpha| and word count
-    correlation = np.corrcoef(abs_alphas, word_counts)[0,1]
+    correlation = np.corrcoef(abs_alphas, word_counts)[0, 1]
     print(f"Correlation between |α| and word count: {correlation:.3f}")
-    
+
     return alphas, word_counts
 
-def plot_results(alphas, word_counts, output_path="comprehensive_steering_analysis.png"):
+
+def plot_results(
+    alphas, word_counts, output_path="comprehensive_steering_analysis.png"
+):
     """Create visualizations of the results."""
-    
+
     plt.figure(figsize=(14, 10))
-    
+
     # Main plot: Alpha vs Word Count
     plt.subplot(2, 2, 1)
-    plt.plot(alphas, word_counts, 'o-', linewidth=2, markersize=8, color='blue')
-    plt.axhline(y=word_counts[alphas.index(0.0)], color='red', linestyle='--', alpha=0.7, label='Baseline')
-    plt.xlabel('Alpha Value')
-    plt.ylabel('Thinking Words')
-    plt.title('Alpha vs Thinking Length')
+    plt.plot(alphas, word_counts, "o-", linewidth=2, markersize=8, color="blue")
+    plt.axhline(
+        y=word_counts[alphas.index(0.0)],
+        color="red",
+        linestyle="--",
+        alpha=0.7,
+        label="Baseline",
+    )
+    plt.xlabel("Alpha Value")
+    plt.ylabel("Thinking Words")
+    plt.title("Alpha vs Thinking Length")
     plt.grid(True, alpha=0.3)
     plt.legend()
-    
-    # Plot: |Alpha| vs Word Count  
+
+    # Plot: |Alpha| vs Word Count
     plt.subplot(2, 2, 2)
     abs_alphas = [abs(alpha) for alpha in alphas]
-    plt.plot(abs_alphas, word_counts, 'o-', linewidth=2, markersize=8, color='green')
-    plt.xlabel('|Alpha| (Absolute Value)')
-    plt.ylabel('Thinking Words')
-    plt.title('|Alpha| vs Thinking Length')
+    plt.plot(abs_alphas, word_counts, "o-", linewidth=2, markersize=8, color="green")
+    plt.xlabel("|Alpha| (Absolute Value)")
+    plt.ylabel("Thinking Words")
+    plt.title("|Alpha| vs Thinking Length")
     plt.grid(True, alpha=0.3)
-    
+
     # Plot: Positive vs Negative Alpha comparison
     plt.subplot(2, 2, 3)
-    neg_alphas = [(alpha, words) for alpha, words in zip(alphas, word_counts) if alpha < 0]
-    pos_alphas = [(alpha, words) for alpha, words in zip(alphas, word_counts) if alpha > 0]
+    neg_alphas = [
+        (alpha, words) for alpha, words in zip(alphas, word_counts) if alpha < 0
+    ]
+    pos_alphas = [
+        (alpha, words) for alpha, words in zip(alphas, word_counts) if alpha > 0
+    ]
     baseline_words = word_counts[alphas.index(0.0)]
-    
+
     if neg_alphas:
         neg_abs, neg_words = zip(*[(abs(alpha), words) for alpha, words in neg_alphas])
-        plt.plot(neg_abs, neg_words, 'o-', linewidth=2, markersize=6, color='red', label='Negative α')
-    
+        plt.plot(
+            neg_abs,
+            neg_words,
+            "o-",
+            linewidth=2,
+            markersize=6,
+            color="red",
+            label="Negative α",
+        )
+
     if pos_alphas:
-        pos_abs, pos_words = zip(*[(alpha, words) for alpha, words in pos_alphas])  
-        plt.plot(pos_abs, pos_words, 'o-', linewidth=2, markersize=6, color='blue', label='Positive α')
-    
-    plt.axhline(y=baseline_words, color='black', linestyle='--', alpha=0.7, label='Baseline')
-    plt.xlabel('|Alpha|')
-    plt.ylabel('Thinking Words')
-    plt.title('Positive vs Negative Alpha Effects')
+        pos_abs, pos_words = zip(*[(alpha, words) for alpha, words in pos_alphas])
+        plt.plot(
+            pos_abs,
+            pos_words,
+            "o-",
+            linewidth=2,
+            markersize=6,
+            color="blue",
+            label="Positive α",
+        )
+
+    plt.axhline(
+        y=baseline_words, color="black", linestyle="--", alpha=0.7, label="Baseline"
+    )
+    plt.xlabel("|Alpha|")
+    plt.ylabel("Thinking Words")
+    plt.title("Positive vs Negative Alpha Effects")
     plt.legend()
     plt.grid(True, alpha=0.3)
-    
+
     # Plot: Change from baseline
     plt.subplot(2, 2, 4)
     baseline_words = word_counts[alphas.index(0.0)]
     changes = [words - baseline_words for words in word_counts]
-    colors = ['red' if alpha < 0 else 'blue' if alpha > 0 else 'black' for alpha in alphas]
+    colors = [
+        "red" if alpha < 0 else "blue" if alpha > 0 else "black" for alpha in alphas
+    ]
     plt.bar(range(len(alphas)), changes, color=colors, alpha=0.7)
-    plt.xlabel('Alpha Index')
-    plt.ylabel('Change from Baseline (words)')
-    plt.title('Change from Baseline by Alpha')
+    plt.xlabel("Alpha Index")
+    plt.ylabel("Change from Baseline (words)")
+    plt.title("Change from Baseline by Alpha")
     plt.xticks(range(len(alphas)), [f"{alpha:.2f}" for alpha in alphas], rotation=45)
     plt.grid(True, alpha=0.3)
-    
+
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"\nVisualization saved to: {output_path}")
     plt.show()
 
+
 def save_results(results, output_path="comprehensive_steering_results.json"):
     """Save results to JSON file."""
-    with open(output_path, 'w') as f:
+    with open(output_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"Results saved to: {output_path}")
 
+
 def main():
     """Run comprehensive steering analysis."""
-    
-    print("="*60)
-    print("COMPREHENSIVE STEERING ANALYSIS")
-    print("="*60)
-    print("Testing relationship between alpha values and reasoning length")
-    print("This will help us understand if the pattern is U-shaped, linear, or other")
-    
+    # Setup logging
+    logger = setup_logging("comprehensive_steering_analysis")
+
+    logger.info("=" * 60)
+    logger.info("COMPREHENSIVE STEERING ANALYSIS")
+    logger.info("=" * 60)
+    logger.info("Testing relationship between alpha values and reasoning length")
+    logger.info(
+        "This will help us understand if the pattern is U-shaped, linear, or other"
+    )
+
     # Run tests
     results = test_alpha_range()
-    
+
     if not results:
-        print("No results obtained. Check your setup.")
+        logger.error("No results obtained. Check your setup.")
         return
-    
+
     # Analyze results
     alphas, word_counts = analyze_results(results)
-    
+
     # Visualize results
     plot_results(alphas, word_counts)
-    
+
     # Save results
     save_results(results)
-    
+
     # Interpretation
-    print("\n" + "="*60)
-    print("INTERPRETATION")
-    print("="*60)
-    
+    logger.info("\n" + "=" * 60)
+    logger.info("INTERPRETATION")
+    logger.info("=" * 60)
+
     baseline_idx = next(i for i, r in enumerate(results) if r["alpha"] == 0.0)
     baseline_words = results[baseline_idx]["thinking_words"]
-    
+
     # Check if U-shaped
     extreme_alphas = [r for r in results if abs(r["alpha"]) >= 0.08]
     moderate_alphas = [r for r in results if 0.02 <= abs(r["alpha"]) <= 0.06]
-    
+
     if extreme_alphas and moderate_alphas:
         extreme_avg = np.mean([r["thinking_words"] for r in extreme_alphas])
         moderate_avg = np.mean([r["thinking_words"] for r in moderate_alphas])
-        
+
         print(f"Extreme |α| ≥ 0.08: {extreme_avg:.0f} words (average)")
         print(f"Moderate 0.02 ≤ |α| ≤ 0.06: {moderate_avg:.0f} words (average)")
         print(f"Baseline α = 0.0: {baseline_words} words")
-        
+
         if extreme_avg > moderate_avg and extreme_avg > baseline_words:
             print("\n✓ CONFIRMED: U-shaped relationship")
             print("  - Large |α| values increase reasoning length")
@@ -363,5 +434,6 @@ def main():
             print("  - Pattern is not simply U-shaped")
             print("  - Further investigation needed")
 
+
 if __name__ == "__main__":
-    main() 
+    main()

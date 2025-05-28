@@ -51,6 +51,7 @@ from tqdm import tqdm
 from datasets import load_dataset
 from transformers import AutoTokenizer
 import sglang as sgl
+from logging_setup import setup_logging, get_logger
 
 # Display installed versions for reproducibility
 import sys
@@ -430,12 +431,16 @@ except Exception as e:
 # %%
 def main(args):
     """Main function to process GSM8K examples and save responses in parallel."""
+    # Setup logging
+    logger = setup_logging("generate_responses_gsm8k")
+
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
+    logger.info(f"Output directory: {args.output_dir}")
     model_short_name = args.model.split("/")[-1]
 
     # Load tokenizer for creating prompts
-    print(f"Loading tokenizer for {args.model}...")
+    logger.info(f"Loading tokenizer for {args.model}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
     # Connect to SGLang server
@@ -443,21 +448,23 @@ def main(args):
         server_url = connect_to_sglang(args.server_url)
 
         # Load dataset
-        print(f"Loading GSM8K dataset...")
+        logger.info(f"Loading GSM8K dataset...")
         dataset = load_gsm8k_dataset(args.num_samples, args.seed)
 
         # Debug dataset structure
-        print(f"Dataset has {len(dataset)} examples")
-        print(f"Dataset features: {dataset.features}")
+        logger.info(f"Dataset has {len(dataset)} examples")
+        logger.debug(f"Dataset features: {dataset.features}")
         if len(dataset) > 0:
-            print(f"Sample batch keys: {list(dataset[0:1].keys())}")
-            print(f"Number of questions in sample: {len(dataset[0:1]['question'])}")
-            print(f"First question: {dataset[0:1]['question'][0]}")
+            logger.debug(f"Sample batch keys: {list(dataset[0:1].keys())}")
+            logger.debug(
+                f"Number of questions in sample: {len(dataset[0:1]['question'])}"
+            )
+            logger.debug(f"First question: {dataset[0:1]['question'][0]}")
 
         # Take a subset of the dataset based on num_samples
         if args.num_samples < len(dataset):
             dataset = dataset.select(range(args.num_samples))
-            print(f"Selected {args.num_samples} examples from the dataset")
+            logger.info(f"Selected {args.num_samples} examples from the dataset")
 
         # Process dataset in batches
         outputs = []
@@ -465,7 +472,7 @@ def main(args):
         for i in range(0, num_examples, args.batch_size):
             end_idx = min(i + args.batch_size, num_examples)
             batch = dataset[i:end_idx]
-            print(
+            logger.info(
                 f"Processing batch of {len(batch['question'])} examples starting at index {i}"
             )
             batch_results = process_batch(server_url, tokenizer, batch, i)
@@ -478,13 +485,13 @@ def main(args):
             with open(output_path, "w") as f:
                 json.dump(outputs, f, indent=2)
 
-            print(f"Saved {len(outputs)} responses so far to {output_path}")
+            logger.info(f"Saved {len(outputs)} responses so far to {output_path}")
 
-        print(f"All responses saved to {output_path}")
+        logger.info(f"All responses saved to {output_path}")
         return outputs
 
     except Exception as e:
-        print(f"Error in main process: {e}")
+        logger.error(f"Error in main process: {e}")
         import traceback
 
         traceback.print_exc()

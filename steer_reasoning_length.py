@@ -33,6 +33,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from logging_setup import setup_logging, get_logger
 
 # Display installed versions
 import sys
@@ -695,6 +696,9 @@ def visualize_results(results, output_dir):
 
 # %%
 def main(args):
+    # Setup logging
+    logger = setup_logging("steer_reasoning_length")
+
     model_short_name = args.model.split("/")[-1]
     directions_file = os.path.join(
         args.directions_dir,
@@ -703,35 +707,38 @@ def main(args):
 
     # Check if directions file exists
     if not os.path.exists(directions_file):
-        print(f"Error: Directions file {directions_file} not found.")
-        print(f"Please run extract_reasoning_length_direction.py first.")
+        logger.error(f"Directions file {directions_file} not found.")
+        logger.error(f"Please run extract_reasoning_length_direction.py first.")
         return None
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+    logger.info(f"Output directory: {args.output_dir}")
 
     # Load the directions
-    print(f"Loading directions from {directions_file}...")
+    logger.info(f"Loading directions from {directions_file}...")
     directions = torch.load(directions_file)
+    logger.info(f"Loaded directions tensor with shape: {directions.shape}")
 
     # Load model and tokenizer
-    print(f"Loading model {args.model}...")
+    logger.info(f"Loading model {args.model}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype="auto", device_map=args.device
     )
-    print(f"Using device: {args.device}")
+    logger.info(f"Using device: {args.device}")
 
     # Load test data
-    print(f"Loading test data...")
+    logger.info(f"Loading test data...")
     test_data = load_test_data(args.num_samples, args.seed)
+    logger.info(f"Loaded {len(test_data)} test examples")
 
     # List to store all results
     all_results = []
 
     # For each steering strength (alpha)
     for alpha in args.direction_weights:
-        print(f"Testing with steering strength α = {alpha}...")
+        logger.info(f"Testing with steering strength α = {alpha}...")
 
         # Process each test example
         for i, example in enumerate(
@@ -780,9 +787,11 @@ def main(args):
         json.dump(serializable_results, f, indent=2)
 
     # Visualize the results
+    logger.info("Creating visualizations...")
     avg_metrics = visualize_results(all_results, args.output_dir)
 
-    print(f"Done! Results saved to {results_file}")
+    logger.info(f"Done! Results saved to {results_file}")
+    logger.info(f"Processed {len(all_results)} total examples")
 
     return all_results, avg_metrics
 

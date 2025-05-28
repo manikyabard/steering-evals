@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import re
+from logging_setup import setup_logging, get_logger
 
 
 def parse_args():
@@ -91,7 +92,8 @@ def count_thinking_tokens(thinking_text, tokenizer):
 
 def compute_thinking_lengths(responses, tokenizer):
     """Compute thinking lengths for all responses."""
-    print("Computing thinking lengths...")
+    logger = get_logger()
+    logger.info("Computing thinking lengths...")
 
     for item in tqdm(responses, desc="Computing thinking lengths"):
         # Handle both formats: direct 'thinking' field or nested 'with_thinking'
@@ -299,7 +301,8 @@ def extract_directions(
 ):
     """Extract direction vectors by contrasting short vs long thinking examples - ThinkEdit style."""
 
-    print(f"Extracting directions for {component} component...")
+    logger = get_logger()
+    logger.info(f"Extracting directions for {component} component...")
 
     # Setup activation extractor
     extractor = ImprovedActivationExtractor(model, component)
@@ -309,7 +312,7 @@ def extract_directions(
     long_activations = []
 
     # Process short thinking examples
-    print(f"Processing {len(short_examples)} short thinking examples...")
+    logger.info(f"Processing {len(short_examples)} short thinking examples...")
     for i, example in enumerate(tqdm(short_examples)):
         try:
             question = example["question"]
@@ -336,7 +339,7 @@ def extract_directions(
             continue
 
     # Process long thinking examples
-    print(f"Processing {len(long_examples)} long thinking examples...")
+    logger.info(f"Processing {len(long_examples)} long thinking examples...")
     for i, example in enumerate(tqdm(long_examples)):
         try:
             question = example["question"]
@@ -363,7 +366,7 @@ def extract_directions(
             continue
 
     # Compute mean activations and directions - ThinkEdit style
-    print("Computing direction vectors...")
+    logger.info("Computing direction vectors...")
 
     # Check if we have sufficient examples
     if len(short_activations) == 0:
@@ -375,7 +378,7 @@ def extract_directions(
             "No long thinking examples processed successfully. Cannot compute direction."
         )
 
-    print(
+    logger.info(
         f"Successfully processed {len(short_activations)} short and {len(long_activations)} long examples"
     )
 
@@ -405,7 +408,9 @@ def extract_directions(
     del short_activations, long_activations
     torch.cuda.empty_cache()
 
-    print(f"Extracted direction tensor with shape: {thinking_length_direction.shape}")
+    logger.info(
+        f"Extracted direction tensor with shape: {thinking_length_direction.shape}"
+    )
     return thinking_length_direction
 
 
@@ -454,34 +459,38 @@ def visualize_directions(directions, output_dir, model_name, component):
 def main():
     args = parse_args()
 
-    print("=" * 60)
-    print("IMPROVED REASONING LENGTH DIRECTION EXTRACTION")
-    print("=" * 60)
-    print(f"Model: {args.model}")
-    print(f"Component: {args.component}")
-    print(f"Short examples: {args.n_short}")
-    print(f"Long examples: {args.n_long}")
-    print(f"Device: {args.device}")
+    # Setup logging
+    logger = setup_logging("extract_reasoning_length_direction_improved")
+
+    logger.info("=" * 60)
+    logger.info("IMPROVED REASONING LENGTH DIRECTION EXTRACTION")
+    logger.info("=" * 60)
+    logger.info(f"Model: {args.model}")
+    logger.info(f"Component: {args.component}")
+    logger.info(f"Short examples: {args.n_short}")
+    logger.info(f"Long examples: {args.n_long}")
+    logger.info(f"Device: {args.device}")
 
     # Load responses
-    print(f"\nLoading responses from: {args.responses_file}")
+    logger.info(f"Loading responses from: {args.responses_file}")
     with open(args.responses_file, "r") as f:
         responses = json.load(f)
-    print(f"Loaded {len(responses)} responses")
+    logger.info(f"Loaded {len(responses)} responses")
 
     # Load model first to get tokenizer for length computation
-    print(f"\nLoading model: {args.model}")
+    logger.info(f"Loading model: {args.model}")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype="auto", device_map=args.device
     )
     model.eval()
+    logger.info(f"Model loaded on device: {args.device}")
 
     # Compute thinking lengths if needed
     if args.recompute_lengths or not any(
         "thinking_length" in item for item in responses
     ):
-        print("Computing thinking lengths...")
+        logger.info("Computing thinking lengths...")
         responses = compute_thinking_lengths(responses, tokenizer)
 
     # Select examples
@@ -496,9 +505,9 @@ def main():
         components = [args.component]
 
     for comp in components:
-        print(f"\n{'='*40}")
-        print(f"Processing {comp.upper()} component")
-        print(f"{'='*40}")
+        logger.info(f"\n{'='*40}")
+        logger.info(f"Processing {comp.upper()} component")
+        logger.info(f"{'='*40}")
 
         directions = extract_directions(
             model, tokenizer, short_examples, long_examples, comp
@@ -510,9 +519,9 @@ def main():
         # Visualize directions
         visualize_directions(directions, args.output_dir, args.model, comp)
 
-    print(f"\n{'='*60}")
-    print("DIRECTION EXTRACTION COMPLETE!")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info("DIRECTION EXTRACTION COMPLETE!")
+    logger.info(f"{'='*60}")
 
 
 if __name__ == "__main__":
