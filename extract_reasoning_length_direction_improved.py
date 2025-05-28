@@ -77,6 +77,37 @@ def parse_args():
         action="store_true",
         help="Recompute thinking lengths (useful if not already computed)",
     )
+    # New percentile-based selection arguments
+    parser.add_argument(
+        "--use_percentiles",
+        action="store_true",
+        help="Use percentile-based selection instead of fixed thresholds",
+    )
+    parser.add_argument(
+        "--short_percentile",
+        type=float,
+        default=20.0,
+        help="Percentile threshold for short thinking examples (bottom X%%, default: 20.0)",
+    )
+    parser.add_argument(
+        "--long_percentile",
+        type=float,
+        default=20.0,
+        help="Percentile threshold for long thinking examples (top X%%, default: 20.0)",
+    )
+    # Keep original fixed threshold arguments for backward compatibility
+    parser.add_argument(
+        "--short_threshold",
+        type=int,
+        default=100,
+        help="Fixed threshold for short thinking examples (< X tokens, default: 100)",
+    )
+    parser.add_argument(
+        "--long_threshold",
+        type=int,
+        default=1000,
+        help="Fixed threshold for long thinking examples (> X tokens, default: 1000)",
+    )
     return parser.parse_args()
 
 
@@ -109,8 +140,17 @@ def compute_thinking_lengths(responses, tokenizer):
     return responses
 
 
-def select_examples_by_length(responses, n_short=100, n_long=100):
-    """Select examples based on thinking length, using ThinkEdit's approach."""
+def select_examples_by_length(
+    responses,
+    n_short=100,
+    n_long=100,
+    use_percentiles=False,
+    short_percentile=20.0,
+    long_percentile=20.0,
+    short_threshold=100,
+    long_threshold=1000,
+):
+    """Select examples based on thinking length, using either fixed thresholds or percentiles."""
 
     # Filter valid responses (ThinkEdit uses thinking_length != -1)
     valid_responses = [
@@ -121,17 +161,64 @@ def select_examples_by_length(responses, n_short=100, n_long=100):
 
     print(f"Found {len(valid_responses)} responses with valid thinking")
 
-    # ThinkEdit's filtering approach: hard thresholds
-    # Long thinking: > 1000 tokens, Short thinking: < 100 tokens
-    long_thinking_examples = [
-        ex for ex in valid_responses if ex["thinking_length"] > 1000
-    ]
-    short_thinking_examples = [
-        ex for ex in valid_responses if ex["thinking_length"] < 100
-    ]
+    if len(valid_responses) == 0:
+        raise ValueError("No valid responses found!")
 
-    print(f"Found {len(long_thinking_examples)} long thinking examples (>1000 tokens)")
-    print(f"Found {len(short_thinking_examples)} short thinking examples (<100 tokens)")
+    # Get all thinking lengths for percentile calculation
+    thinking_lengths = [item["thinking_length"] for item in valid_responses]
+    thinking_lengths_array = np.array(thinking_lengths)
+
+    print(f"Thinking length statistics:")
+    print(f"  Min: {min(thinking_lengths)} tokens")
+    print(f"  Max: {max(thinking_lengths)} tokens")
+    print(f"  Mean: {np.mean(thinking_lengths):.1f} tokens")
+    print(f"  Median: {np.median(thinking_lengths):.1f} tokens")
+    print(f"  Std: {np.std(thinking_lengths):.1f} tokens")
+
+    if use_percentiles:
+        # Percentile-based selection
+        print(f"\nUsing percentile-based selection:")
+        print(f"  Short: bottom {short_percentile}%")
+        print(f"  Long: top {long_percentile}%")
+
+        # Calculate percentile thresholds
+        short_threshold_percentile = np.percentile(
+            thinking_lengths_array, short_percentile
+        )
+        long_threshold_percentile = np.percentile(
+            thinking_lengths_array, 100 - long_percentile
+        )
+
+        print(f"  Short threshold: ≤ {short_threshold_percentile:.1f} tokens")
+        print(f"  Long threshold: ≥ {long_threshold_percentile:.1f} tokens")
+
+        # Select examples based on percentiles
+        short_thinking_examples = [
+            ex
+            for ex in valid_responses
+            if ex["thinking_length"] <= short_threshold_percentile
+        ]
+        long_thinking_examples = [
+            ex
+            for ex in valid_responses
+            if ex["thinking_length"] >= long_threshold_percentile
+        ]
+
+    else:
+        # Fixed threshold selection (original ThinkEdit approach)
+        print(f"\nUsing fixed thresholds:")
+        print(f"  Short: < {short_threshold} tokens")
+        print(f"  Long: > {long_threshold} tokens")
+
+        short_thinking_examples = [
+            ex for ex in valid_responses if ex["thinking_length"] < short_threshold
+        ]
+        long_thinking_examples = [
+            ex for ex in valid_responses if ex["thinking_length"] > long_threshold
+        ]
+
+    print(f"Found {len(long_thinking_examples)} long thinking examples")
+    print(f"Found {len(short_thinking_examples)} short thinking examples")
 
     # Use available examples (may be less than requested n_short/n_long)
     short_examples = (
@@ -414,12 +501,15 @@ def extract_directions(
     return thinking_length_direction
 
 
-def save_directions(directions, output_dir, model_name, component):
+def save_directions(
+    directions, output_dir, model_name, component, use_percentiles=False
+):
     """Save the extracted directions."""
     os.makedirs(output_dir, exist_ok=True)
 
     model_short_name = model_name.split("/")[-1]
-    filename = f"{model_short_name}_thinking_length_direction_gsm8k_{component}.pt"
+    method_suffix = "percentiles" if use_percentiles else "thresholds"
+    filename = f"{model_short_name}_thinking_length_direction_gsm8k_{component}_{method_suffix}.pt"
     filepath = os.path.join(output_dir, filename)
 
     torch.save(directions, filepath)
@@ -428,7 +518,9 @@ def save_directions(directions, output_dir, model_name, component):
     return filepath
 
 
-def visualize_directions(directions, output_dir, model_name, component):
+def visualize_directions(
+    directions, output_dir, model_name, component, use_percentiles=False
+):
     """Visualize direction magnitudes across layers."""
     # directions is now a tensor of shape [num_layers, hidden_size]
     num_layers = directions.shape[0]
@@ -439,16 +531,19 @@ def visualize_directions(directions, output_dir, model_name, component):
     plt.plot(layer_indices, direction_norms, "o-", linewidth=2, markersize=6)
     plt.xlabel("Layer Index")
     plt.ylabel("Direction Magnitude")
+
+    # Include selection method in title
+    selection_method = "Percentiles" if use_percentiles else "Fixed Thresholds"
     plt.title(
-        f"Reasoning Length Direction Magnitudes ({component.upper()}) - {model_name}"
+        f"Reasoning Length Direction Magnitudes ({component.upper()}) - {model_name}\n"
+        f"Selection: {selection_method}"
     )
     plt.grid(True, alpha=0.3)
 
-    # Save plot
+    # Save plot with method info in filename
     model_short_name = model_name.split("/")[-1]
-    plot_filename = (
-        f"{model_short_name}_thinkedit_style_{component}_direction_magnitudes.png"
-    )
+    method_suffix = "percentiles" if use_percentiles else "thresholds"
+    plot_filename = f"{model_short_name}_thinkedit_style_{component}_direction_magnitudes_{method_suffix}.png"
     plot_path = os.path.join(output_dir, plot_filename)
     plt.savefig(plot_path, dpi=300, bbox_inches="tight")
     print(f"Visualization saved to: {plot_path}")
@@ -470,6 +565,16 @@ def main():
     logger.info(f"Short examples: {args.n_short}")
     logger.info(f"Long examples: {args.n_long}")
     logger.info(f"Device: {args.device}")
+
+    # Log selection method
+    if args.use_percentiles:
+        logger.info(f"Selection method: Percentiles")
+        logger.info(f"  Short: bottom {args.short_percentile}%")
+        logger.info(f"  Long: top {args.long_percentile}%")
+    else:
+        logger.info(f"Selection method: Fixed thresholds")
+        logger.info(f"  Short: < {args.short_threshold} tokens")
+        logger.info(f"  Long: > {args.long_threshold} tokens")
 
     # Load responses
     logger.info(f"Loading responses from: {args.responses_file}")
@@ -495,7 +600,14 @@ def main():
 
     # Select examples
     short_examples, long_examples = select_examples_by_length(
-        responses, args.n_short, args.n_long
+        responses,
+        args.n_short,
+        args.n_long,
+        args.use_percentiles,
+        args.short_percentile,
+        args.long_percentile,
+        args.short_threshold,
+        args.long_threshold,
     )
 
     # Extract directions
@@ -514,10 +626,14 @@ def main():
         )
 
         # Save directions
-        save_directions(directions, args.output_dir, args.model, comp)
+        save_directions(
+            directions, args.output_dir, args.model, comp, args.use_percentiles
+        )
 
         # Visualize directions
-        visualize_directions(directions, args.output_dir, args.model, comp)
+        visualize_directions(
+            directions, args.output_dir, args.model, comp, args.use_percentiles
+        )
 
     logger.info(f"\n{'='*60}")
     logger.info("DIRECTION EXTRACTION COMPLETE!")
