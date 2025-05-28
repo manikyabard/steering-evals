@@ -113,11 +113,32 @@ def parse_args():
         default=20,  # Recommended for thinking mode
         help="Top-k sampling parameter",
     )
+    # NEW: Efficiency parameters
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=4,
+        help="Batch size for processing multiple examples simultaneously",
+    )
+    parser.add_argument(
+        "--use_efficient_mode",
+        action="store_true",
+        help="Use efficient batch processing mode for faster evaluation",
+    )
+    parser.add_argument(
+        "--low_memory_mode",
+        action="store_true",
+        help="Enable low memory optimizations (smaller batch sizes, more frequent cleanup)",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda:0" if torch.cuda.is_available() else "cpu",
+        default=(
+            "cuda:0"
+            if torch.cuda.is_available()
+            else "mps" if torch.backends.mps.is_available() else "cpu"
+        ),
         help="Device to use for computation (e.g., cuda:0, cpu)",
     )
     return parser.parse_args()
@@ -145,6 +166,10 @@ class NotebookArgs:
         self.top_k = 20  # Recommended for thinking mode
         self.seed = 42  # Random seed for reproducibility
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"  # Device to use
+        # NEW: Efficiency parameters
+        self.batch_size = 4  # Batch size for processing
+        self.use_efficient_mode = True  # Enable efficient mode by default in notebooks
+        self.low_memory_mode = False  # Enable if you have memory constraints
 
 
 # Use NotebookArgs when running as notebook, otherwise parse command line arguments
@@ -273,10 +298,12 @@ class SteeringMLPLayer(torch.nn.Module):
 # %%
 def load_test_data(num_samples=10, seed=42):
     """Load and prepare the GSM8K test dataset."""
-    dataset = load_dataset("gsm8k", "main")
+    # dataset = load_dataset("gsm8k", "main")
 
-    # Use the test split and take a subset
-    test_data = dataset["test"].shuffle(seed=seed).select(range(num_samples))
+    # # Use the test split and take a subset
+    # test_data = dataset["test"].shuffle(seed=seed).select(range(num_samples))
+
+    test_data = load_dataset("openai/gsm8k", "main", split="test[:200]")
 
     return test_data
 
@@ -434,85 +461,85 @@ def generate_with_steering(
 
 # %%
 # Load model
-try:
-    print(f"Loading model {args.model}...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype="auto", device_map=args.device
-    )
-    print(f"Using device: {args.device}")
+# try:
+#     print(f"Loading model {args.model}...")
+#     tokenizer = AutoTokenizer.from_pretrained(args.model)
+#     model = AutoModelForCausalLM.from_pretrained(
+#         args.model, torch_dtype="auto", device_map=args.device
+#     )
+#     print(f"Using device: {args.device}")
 
-    # Print model information
-    print(f"Model loaded: {args.model}")
-    print(
-        f"Number of parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M"
-    )
+#     # Print model information
+#     print(f"Model loaded: {args.model}")
+#     print(
+#         f"Number of parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M"
+#     )
 
-    # Test steering if directions are available
-    if "directions" in locals():
-        test_question = "If there are 5 apples and 3 are eaten, how many remain?"
+#     # Test steering if directions are available
+#     if "directions" in locals():
+#         test_question = "If there are 5 apples and 3 are eaten, how many remain?"
 
-        print("\nTesting steering with a simple example...")
-        print("Test question:", test_question)
+#         print("\nTesting steering with a simple example...")
+#         print("Test question:", test_question)
 
-        # Generate with correctly interpreted alpha values
-        # Based on our findings: negative alpha = longer reasoning, positive alpha = shorter reasoning
-        test_alphas = [(-0.1, "longer"), (0.0, "neutral"), (0.1, "shorter")]
+#         # Generate with correctly interpreted alpha values
+#         # Based on our findings: negative alpha = longer reasoning, positive alpha = shorter reasoning
+#         test_alphas = [(-0.1, "longer"), (0.0, "neutral"), (0.1, "shorter")]
 
-        print(f"\n=== Testing steering direction (based on observed behavior) ===")
-        print(
-            "Note: For this model, negative α produces longer reasoning, positive α produces shorter reasoning"
-        )
+#         print(f"\n=== Testing steering direction (based on observed behavior) ===")
+#         print(
+#             "Note: For this model, negative α produces longer reasoning, positive α produces shorter reasoning"
+#         )
 
-        for alpha, reasoning_type in test_alphas:
-            print(f"\nGenerating with α = {alpha} ({reasoning_type} reasoning)...")
+#         for alpha, reasoning_type in test_alphas:
+#             print(f"\nGenerating with α = {alpha} ({reasoning_type} reasoning)...")
 
-            # Apply steering
-            hooks = apply_steering_layers(
-                model, directions, alpha=alpha, component=args.component
-            )
+#             # Apply steering
+#             hooks = apply_steering_layers(
+#                 model, directions, alpha=alpha, component=args.component
+#             )
 
-            # Generate response
-            messages = [{"role": "user", "content": test_question}]
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=True,
-            )
-            inputs = tokenizer([text], return_tensors="pt").to(model.device)
+#             # Generate response
+#             messages = [{"role": "user", "content": test_question}]
+#             text = tokenizer.apply_chat_template(
+#                 messages,
+#                 tokenize=False,
+#                 add_generation_prompt=True,
+#                 enable_thinking=True,
+#             )
+#             inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
-            with torch.no_grad():
-                output = model.generate(
-                    **inputs,
-                    max_new_tokens=args.max_new_tokens,
-                    do_sample=True,
-                    temperature=args.temperature,
-                    top_p=args.top_p,
-                    top_k=args.top_k,
-                    pad_token_id=tokenizer.eos_token_id,
-                )
+#             with torch.no_grad():
+#                 output = model.generate(
+#                     **inputs,
+#                     max_new_tokens=args.max_new_tokens,
+#                     do_sample=True,
+#                     temperature=args.temperature,
+#                     top_p=args.top_p,
+#                     top_k=args.top_k,
+#                     pad_token_id=tokenizer.eos_token_id,
+#                 )
 
-            # Decode the response
-            response = tokenizer.decode(
-                output[0][len(inputs.input_ids[0]) :], skip_special_tokens=True
-            )
-            thinking_length = count_thinking_length(response)
+#             # Decode the response
+#             response = tokenizer.decode(
+#                 output[0][len(inputs.input_ids[0]) :], skip_special_tokens=True
+#             )
+#             thinking_length = count_thinking_length(response)
 
-            print(f"Thinking length: {thinking_length} words")
-            print(f"Sample thinking: {response[:200]}...")
+#             print(f"Thinking length: {thinking_length} words")
+#             print(f"Sample thinking: {response[:200]}...")
 
-            # Remove steering
-            remove_steering_layers(hooks)
+#             # Remove steering
+#             remove_steering_layers(hooks)
 
-            # Clear memory
-            del hooks, output, response
-            torch.cuda.empty_cache()
-    else:
-        print("No directions available for testing")
-except Exception as e:
-    print(f"Error loading model or testing: {e}")
-    print("If you're running in a limited environment, you can skip this test cell.")
+#             # Clear memory
+#             del hooks, output, response
+#             torch.cuda.empty_cache()
+#     else:
+#         print("No directions available for testing")
+# except Exception as e:
+#     print(f"Error loading model or testing: {e}")
+#     print("If you're running in a limited environment, you can skip this test cell.")
 
 # %% [markdown]
 # ## Step 6: Evaluation Functions
@@ -796,6 +823,351 @@ def main(args):
     return all_results, avg_metrics
 
 
+# %%
+def count_thinking_length(response):
+    """Count words in the thinking section of a response."""
+    if "<think>" in response and "</think>" in response:
+        thinking_start = response.find("<think>") + len("<think>")
+        thinking_end = response.find("</think>")
+        thinking_content = response[thinking_start:thinking_end].strip()
+        return len(thinking_content.split())
+    return 0
+
+
+# %% [markdown]
+# ## Efficient Batch Processing Functions
+#
+# These functions implement batch processing to significantly improve efficiency.
+
+
+# %%
+def apply_steering_layers_batch_efficient(
+    model, directions, alpha=0.0, component="attn"
+):
+    """Apply steering layers efficiently for batch processing."""
+    if component == "attn":
+
+        def adjust_residual_hook(layer_idx):
+            def hook_fn(module, input, output):
+                # Handle both tuple and tensor outputs efficiently
+                if isinstance(output, tuple):
+                    modified_output = output[0] + alpha * directions[layer_idx].to(
+                        model.device
+                    )
+                    return (modified_output,) + output[1:]
+                else:
+                    return output + alpha * directions[layer_idx].to(model.device)
+
+            return hook_fn
+
+        hooks = []
+        for i, layer in enumerate(model.model.layers):
+            if i < len(directions):
+                hook = layer.self_attn.register_forward_hook(adjust_residual_hook(i))
+                hooks.append(hook)
+        return hooks
+
+    elif component == "mlp":
+
+        def adjust_residual_hook(layer_idx):
+            def hook_fn(module, input, output):
+                return output + alpha * directions[layer_idx].to(model.device)
+
+            return hook_fn
+
+        hooks = []
+        for i, layer in enumerate(model.model.layers):
+            if i < len(directions):
+                hook = layer.mlp.register_forward_hook(adjust_residual_hook(i))
+                hooks.append(hook)
+        return hooks
+
+
+# %%
+def generate_batch_with_steering(
+    model,
+    tokenizer,
+    questions,
+    alpha=0.0,
+    directions=None,
+    component="attn",
+    max_new_tokens=32768,
+    temperature=0.6,
+    top_p=0.95,
+    top_k=20,
+    batch_size=4,
+):
+    """Generate responses for a batch of questions with steering applied."""
+    if directions is None:
+        raise ValueError("Directions must be provided for steering")
+
+    all_responses = []
+
+    # Process in smaller batches to manage memory
+    for i in range(0, len(questions), batch_size):
+        batch_questions = questions[i : i + batch_size]
+
+        # Prepare batch prompts
+        prompts = []
+        for question in batch_questions:
+            prompt = f"Solve this math problem step by step, and put your final answer within \\boxed{{}}:\n{question}"
+            messages = [{"role": "user", "content": prompt}]
+            text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=True,
+            )
+            prompts.append(text)
+
+        # Tokenize batch with padding
+        inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=4096,  # Reasonable limit for input
+        ).to(model.device)
+
+        # Apply steering once for the batch
+        hooks = apply_steering_layers_batch_efficient(
+            model, directions, alpha, component
+        )
+
+        try:
+            # Generate batch
+            with torch.no_grad():
+                generated_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+
+            # Process batch outputs
+            batch_responses = []
+            for j, (input_ids, generated) in enumerate(
+                zip(inputs.input_ids, generated_ids)
+            ):
+                # Extract only the generated part
+                output_ids = generated[len(input_ids) :].tolist()
+
+                # Parse thinking content
+                try:
+                    think_end_token = tokenizer.encode(
+                        "</think>", add_special_tokens=False
+                    )[-1]
+                    think_end_index = (
+                        output_ids.index(think_end_token)
+                        if think_end_token in output_ids
+                        else -1
+                    )
+
+                    if think_end_index != -1:
+                        thinking_content = tokenizer.decode(
+                            output_ids[:think_end_index], skip_special_tokens=True
+                        ).strip()
+                        if thinking_content.startswith("<think>"):
+                            thinking_content = thinking_content[
+                                len("<think>") :
+                            ].strip()
+
+                        content = tokenizer.decode(
+                            output_ids[think_end_index + 1 :], skip_special_tokens=True
+                        ).strip()
+                        response = {"thinking": thinking_content, "response": content}
+                    else:
+                        content = tokenizer.decode(
+                            output_ids, skip_special_tokens=True
+                        ).strip()
+                        response = {"thinking": "", "response": content}
+
+                    batch_responses.append(response)
+
+                except (ValueError, IndexError):
+                    content = tokenizer.decode(
+                        output_ids, skip_special_tokens=True
+                    ).strip()
+                    batch_responses.append({"thinking": "", "response": content})
+
+            all_responses.extend(batch_responses)
+
+        finally:
+            # Always remove hooks
+            remove_steering_layers(hooks)
+
+        # Clear memory after each batch
+        del inputs, generated_ids
+        torch.cuda.empty_cache()
+
+    return all_responses
+
+
+# %%
+def evaluate_steering_batch_efficient(
+    model,
+    tokenizer,
+    test_data,
+    directions,
+    alpha_values,
+    component="attn",
+    batch_size=4,
+    max_new_tokens=32768,
+    temperature=0.6,
+    top_p=0.95,
+    top_k=20,
+):
+    """Efficiently evaluate steering across multiple alpha values using batch processing."""
+    all_results = []
+
+    # Extract questions and answers once
+    questions = [example["question"] for example in test_data]
+    answers = [example["answer"] for example in test_data]
+
+    for alpha in tqdm(alpha_values, desc="Testing steering strengths"):
+        print(f"\nProcessing α = {alpha}")
+
+        # Generate all responses for this alpha in batches
+        responses = generate_batch_with_steering(
+            model,
+            tokenizer,
+            questions,
+            alpha=alpha,
+            directions=directions,
+            component=component,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            batch_size=batch_size,
+        )
+
+        # Calculate metrics for all responses
+        for i, (response, answer) in enumerate(zip(responses, answers)):
+            metrics = calculate_metrics(response, alpha)
+            metrics["question_id"] = i
+            metrics["is_correct"] = is_correct(response, answer)
+            metrics["response"] = response
+            all_results.append(metrics)
+
+        print(f"Completed α = {alpha}, processed {len(responses)} examples")
+
+    return all_results
+
+
+# %%
+def preload_and_cache_directions(directions_file, device):
+    """Preload directions and move to appropriate device for faster access."""
+    directions = torch.load(directions_file, map_location=device)
+    # Ensure directions are contiguous for faster memory access
+    if directions.dim() > 1:
+        directions = directions.contiguous()
+    return directions
+
+
+# %%
+def memory_efficient_main(args):
+    """Memory-efficient version of the main function with batch processing."""
+    # Setup logging
+    logger = setup_logging("steer_reasoning_length_efficient")
+
+    model_short_name = args.model.split("/")[-1]
+    directions_file = os.path.join(
+        args.directions_dir,
+        f"{model_short_name}_thinking_length_direction_gsm8k_{args.component}.pt",
+    )
+
+    # Check if directions file exists
+    if not os.path.exists(directions_file):
+        logger.error(f"Directions file {directions_file} not found.")
+        return None
+
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Load model and tokenizer once
+    logger.info(f"Loading model {args.model}...")
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, torch_dtype="auto", device_map=args.device
+    )
+
+    # Preload and cache directions
+    logger.info(f"Loading directions from {directions_file}...")
+    directions = preload_and_cache_directions(directions_file, model.device)
+    logger.info(f"Loaded directions tensor with shape: {directions.shape}")
+
+    # Load test data once
+    logger.info(f"Loading test data...")
+    test_data = load_test_data(args.num_samples, args.seed)
+    logger.info(f"Loaded {len(test_data)} test examples")
+
+    # Calculate optimal batch size based on available memory
+    if hasattr(args, "batch_size"):
+        batch_size = args.batch_size
+    else:
+        # Auto-determine batch size based on model size and available memory
+        if torch.cuda.is_available():
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            if total_memory > 20e9:  # >20GB
+                batch_size = 8
+            elif total_memory > 10e9:  # >10GB
+                batch_size = 4
+            else:
+                batch_size = 2
+        else:
+            batch_size = 2
+
+    logger.info(f"Using batch size: {batch_size}")
+
+    # Efficient batch evaluation
+    logger.info("Starting efficient batch evaluation...")
+    all_results = evaluate_steering_batch_efficient(
+        model,
+        tokenizer,
+        test_data,
+        directions,
+        args.direction_weights,
+        component=args.component,
+        batch_size=batch_size,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+    )
+
+    # Save results
+    results_file = os.path.join(
+        args.output_dir,
+        f"{model_short_name}_{args.component}_steering_results_efficient.json",
+    )
+
+    # Convert to JSON-serializable format
+    serializable_results = []
+    for r in all_results:
+        result_copy = r.copy()
+        result_copy["response"] = {
+            "thinking": r["response"]["thinking"],
+            "response": r["response"]["response"],
+        }
+        serializable_results.append(result_copy)
+
+    with open(results_file, "w") as f:
+        json.dump(serializable_results, f, indent=2)
+
+    # Visualize results
+    logger.info("Creating visualizations...")
+    avg_metrics = visualize_results(all_results, args.output_dir)
+
+    logger.info(f"Efficient processing complete! Results saved to {results_file}")
+    logger.info(f"Processed {len(all_results)} total examples")
+
+    return all_results, avg_metrics
+
+
 # %% [markdown]
 # ## Execute the Main Function
 #
@@ -805,12 +1177,30 @@ def main(args):
 # Execute the main function when running as a script or if explicitly requested
 if __name__ == "__main__" or "ipykernel" in sys.modules:
     if "ipykernel" in sys.modules:
-        print("Running in notebook mode with a smaller test set...")
+        print("Running in notebook mode with efficiency optimizations...")
         # Use a smaller number of samples and fewer alpha values for interactive testing
         args.num_samples = min(args.num_samples, 3)
 
-    # Run the main function
-    results, avg_metrics = main(args)
+        # Adjust batch size for memory constraints in notebook mode
+        if args.low_memory_mode:
+            args.batch_size = max(1, args.batch_size // 2)
+            print(f"Low memory mode: using batch size {args.batch_size}")
+
+    # Choose efficient or standard mode
+    if args.use_efficient_mode:
+        print("Using efficient batch processing mode...")
+        print(f"Batch size: {args.batch_size}")
+        print(
+            f"Processing {args.num_samples} samples with {len(args.direction_weights)} alpha values"
+        )
+        print(f"Total generations: {args.num_samples * len(args.direction_weights)}")
+
+        # Run the efficient version
+        results, avg_metrics = memory_efficient_main(args)
+    else:
+        print("Using standard (single-sample) processing mode...")
+        # Run the original main function
+        results, avg_metrics = main(args)
 
     # In notebook mode, let's examine one result in detail
     if "ipykernel" in sys.modules and results and len(results) >= 3:
@@ -859,14 +1249,3 @@ if __name__ == "__main__" or "ipykernel" in sys.modules:
 # - Positive alpha values increase reasoning length, while negative values decrease it
 # - There may be an optimal reasoning length for accuracy
 # - The relationship between reasoning length and accuracy is task-dependent
-
-
-# %%
-def count_thinking_length(response):
-    """Count words in the thinking section of a response."""
-    if "<think>" in response and "</think>" in response:
-        thinking_start = response.find("<think>") + len("<think>")
-        thinking_end = response.find("</think>")
-        thinking_content = response[thinking_start:thinking_end].strip()
-        return len(thinking_content.split())
-    return 0
