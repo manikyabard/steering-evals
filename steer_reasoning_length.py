@@ -395,6 +395,93 @@ def remove_steering_layers(hooks):
 
 
 # %%
+def generate_single_with_steering(
+    model,
+    tokenizer,
+    question,
+    alpha=0.0,
+    directions=None,
+    component="attn",
+    max_new_tokens=32768,
+    temperature=0.6,
+    top_p=0.95,
+    top_k=20,
+):
+    """Generate a response for a single question with steering applied."""
+    if directions is None:
+        raise ValueError("Directions must be provided for steering")
+
+    # Create the prompt with step-by-step reasoning instruction
+    prompt = f"Solve this math problem step by step, and put your final answer within \\boxed{{}}:\n{question}"
+
+    messages = [{"role": "user", "content": prompt}]
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=True,  # Enable thinking mode
+    )
+
+    inputs = tokenizer([text], return_tensors="pt").to(model.device)
+
+    # Apply steering
+    hooks = apply_steering_layers(model, directions, alpha, component)
+
+    try:
+        # Generate with steering applied
+        with torch.no_grad():
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,  # Use sampling as recommended
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+        # Process the output
+        output_ids = generated_ids[0][len(inputs.input_ids[0]) :].tolist()
+
+        # Parse thinking content
+        try:
+            # Find index of </think> token
+            think_end_token = tokenizer.encode("</think>", add_special_tokens=False)[-1]
+            think_end_index = (
+                output_ids.index(think_end_token)
+                if think_end_token in output_ids
+                else -1
+            )
+
+            if think_end_index != -1:
+                # Check if <think> tag is present at the beginning and remove it
+                thinking_content = tokenizer.decode(
+                    output_ids[:think_end_index], skip_special_tokens=True
+                ).strip()
+                if thinking_content.startswith("<think>"):
+                    thinking_content = thinking_content[len("<think>") :].strip()
+
+                content = tokenizer.decode(
+                    output_ids[think_end_index + 1 :], skip_special_tokens=True
+                ).strip()
+                return {"thinking": thinking_content, "response": content}
+        except ValueError:
+            pass
+
+        # If no thinking token found or error occurred, return everything as response
+        content = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+        return {"thinking": "", "response": content}
+
+    finally:
+        # Remove steering hooks
+        remove_steering_layers(hooks)
+        # Clear memory
+        del inputs, generated_ids
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+# %%
 def generate_with_steering(
     model,
     tokenizer,
@@ -798,7 +885,7 @@ def main(args):
             answer = example["answer"]
 
             # Generate response with steering
-            response = generate_with_steering(
+            response = generate_single_with_steering(
                 model,
                 tokenizer,
                 question,
@@ -924,107 +1011,198 @@ def generate_batch_with_steering(
     if directions is None:
         raise ValueError("Directions must be provided for steering")
 
+    logger = get_logger("generate_batch_with_steering")
     all_responses = []
 
     # Process in smaller batches to manage memory
     for i in range(0, len(questions), batch_size):
         batch_questions = questions[i : i + batch_size]
-
-        # Prepare batch prompts
-        prompts = []
-        for question in batch_questions:
-            prompt = f"Solve this math problem step by step, and put your final answer within \\boxed{{}}:\n{question}"
-            messages = [{"role": "user", "content": prompt}]
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=True,
-            )
-            prompts.append(text)
-
-        # Tokenize batch with padding
-        inputs = tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=4096,  # Reasonable limit for input
-        ).to(model.device)
-
-        # Apply steering once for the batch
-        hooks = apply_steering_layers_batch_efficient(
-            model, directions, alpha, component
+        logger.info(
+            f"Processing batch {i//batch_size + 1}, questions {i+1}-{min(i+batch_size, len(questions))}"
         )
 
         try:
-            # Generate batch
-            with torch.no_grad():
-                generated_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=True,
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_k=top_k,
-                    pad_token_id=tokenizer.eos_token_id,
+            # Clear GPU cache before each batch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            # Prepare batch prompts
+            prompts = []
+            for question in batch_questions:
+                prompt = f"Solve this math problem step by step, and put your final answer within \\boxed{{}}:\n{question}"
+                messages = [{"role": "user", "content": prompt}]
+                text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=True,
                 )
+                prompts.append(text)
 
-            # Process batch outputs
-            batch_responses = []
-            for j, (input_ids, generated) in enumerate(
-                zip(inputs.input_ids, generated_ids)
-            ):
-                # Extract only the generated part
-                output_ids = generated[len(input_ids) :].tolist()
+            # Tokenize batch with padding
+            inputs = tokenizer(
+                prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=4096,  # Reasonable limit for input
+            ).to(model.device)
 
-                # Parse thinking content
-                try:
-                    think_end_token = tokenizer.encode(
-                        "</think>", add_special_tokens=False
-                    )[-1]
-                    think_end_index = (
-                        output_ids.index(think_end_token)
-                        if think_end_token in output_ids
-                        else -1
+            # Apply steering once for the batch
+            hooks = apply_steering_layers_batch_efficient(
+                model, directions, alpha, component
+            )
+
+            try:
+                # Generate batch
+                with torch.no_grad():
+                    generated_ids = model.generate(
+                        **inputs,
+                        max_new_tokens=max_new_tokens,
+                        do_sample=True,
+                        temperature=temperature,
+                        top_p=top_p,
+                        top_k=top_k,
+                        pad_token_id=tokenizer.eos_token_id,
                     )
 
-                    if think_end_index != -1:
-                        thinking_content = tokenizer.decode(
-                            output_ids[:think_end_index], skip_special_tokens=True
-                        ).strip()
-                        if thinking_content.startswith("<think>"):
-                            thinking_content = thinking_content[
-                                len("<think>") :
-                            ].strip()
+                # Process batch outputs
+                batch_responses = []
+                for j, (input_ids, generated) in enumerate(
+                    zip(inputs.input_ids, generated_ids)
+                ):
+                    # Extract only the generated part
+                    output_ids = generated[len(input_ids) :].tolist()
 
-                        content = tokenizer.decode(
-                            output_ids[think_end_index + 1 :], skip_special_tokens=True
-                        ).strip()
-                        response = {"thinking": thinking_content, "response": content}
-                    else:
+                    # Parse thinking content
+                    try:
+                        think_end_token = tokenizer.encode(
+                            "</think>", add_special_tokens=False
+                        )[-1]
+                        think_end_index = (
+                            output_ids.index(think_end_token)
+                            if think_end_token in output_ids
+                            else -1
+                        )
+
+                        if think_end_index != -1:
+                            thinking_content = tokenizer.decode(
+                                output_ids[:think_end_index], skip_special_tokens=True
+                            ).strip()
+                            if thinking_content.startswith("<think>"):
+                                thinking_content = thinking_content[
+                                    len("<think>") :
+                                ].strip()
+
+                            content = tokenizer.decode(
+                                output_ids[think_end_index + 1 :],
+                                skip_special_tokens=True,
+                            ).strip()
+                            response = {
+                                "thinking": thinking_content,
+                                "response": content,
+                            }
+                        else:
+                            content = tokenizer.decode(
+                                output_ids, skip_special_tokens=True
+                            ).strip()
+                            response = {"thinking": "", "response": content}
+
+                        batch_responses.append(response)
+
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"Error parsing response for question {j}: {e}")
                         content = tokenizer.decode(
                             output_ids, skip_special_tokens=True
                         ).strip()
-                        response = {"thinking": "", "response": content}
+                        batch_responses.append({"thinking": "", "response": content})
 
-                    batch_responses.append(response)
+                all_responses.extend(batch_responses)
+                logger.info(f"Successfully processed batch {i//batch_size + 1}")
 
-                except (ValueError, IndexError):
-                    content = tokenizer.decode(
-                        output_ids, skip_special_tokens=True
-                    ).strip()
-                    batch_responses.append({"thinking": "", "response": content})
+            except torch.cuda.OutOfMemoryError as e:
+                logger.error(f"CUDA OOM error in batch {i//batch_size + 1}: {e}")
+                logger.error(
+                    f"Batch size: {len(batch_questions)}, Max new tokens: {max_new_tokens}"
+                )
+                logger.error("Try reducing batch_size or max_new_tokens")
+                logger.error("Memory optimization suggestions:")
+                logger.error("  1. Reduce --batch_size (e.g., from 4 to 2 or 1)")
+                logger.error(
+                    "  2. Reduce --max_new_tokens (e.g., from 32768 to 16384 or 8192)"
+                )
+                logger.error("  3. Use --low_memory_mode flag")
+                logger.error(
+                    "  4. Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+                )
 
-            all_responses.extend(batch_responses)
+                # Fallback: process questions one by one
+                logger.info("Falling back to single-question processing for this batch")
+                batch_responses = []
+                for j, question in enumerate(batch_questions):
+                    try:
+                        # Clear cache before each question
+                        torch.cuda.empty_cache()
+
+                        # Process single question using the dedicated single function
+                        single_response = generate_single_with_steering(
+                            model,
+                            tokenizer,
+                            question,
+                            alpha,
+                            directions,
+                            component,
+                            max_new_tokens,
+                            temperature,
+                            top_p,
+                            top_k,
+                        )
+                        batch_responses.append(single_response)
+                        logger.info(
+                            f"Successfully processed question {i+j+1} individually"
+                        )
+
+                    except torch.cuda.OutOfMemoryError as e2:
+                        logger.error(
+                            f"CUDA OOM even with single question {i+j+1}: {e2}"
+                        )
+                        # Return empty response for this question
+                        batch_responses.append(
+                            {"thinking": "", "response": "Error: Out of memory"}
+                        )
+
+                all_responses.extend(batch_responses)
+
+            except Exception as e:
+                logger.error(f"Unexpected error in batch {i//batch_size + 1}: {e}")
+                # Create empty responses for this batch
+                empty_responses = [
+                    {"thinking": "", "response": f"Error: {str(e)}"}
+                    for _ in batch_questions
+                ]
+                all_responses.extend(empty_responses)
+
+            finally:
+                # Always remove hooks
+                remove_steering_layers(hooks)
+
+        except Exception as e:
+            logger.error(f"Error setting up batch {i//batch_size + 1}: {e}")
+            # Create empty responses for this batch
+            empty_responses = [
+                {"thinking": "", "response": f"Setup error: {str(e)}"}
+                for _ in batch_questions
+            ]
+            all_responses.extend(empty_responses)
 
         finally:
-            # Always remove hooks
-            remove_steering_layers(hooks)
-
-        # Clear memory after each batch
-        del inputs, generated_ids
-        torch.cuda.empty_cache()
+            # Clear memory after each batch
+            if "inputs" in locals():
+                del inputs
+            if "generated_ids" in locals():
+                del generated_ids
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     return all_responses
 
@@ -1044,6 +1222,7 @@ def evaluate_steering_batch_efficient(
     top_k=20,
 ):
     """Efficiently evaluate steering across multiple alpha values using batch processing."""
+    logger = get_logger("evaluate_steering_batch_efficient")
     all_results = []
 
     # Extract questions and answers once
@@ -1051,32 +1230,52 @@ def evaluate_steering_batch_efficient(
     answers = [example["answer"] for example in test_data]
 
     for alpha in tqdm(alpha_values, desc="Testing steering strengths"):
-        print(f"\nProcessing α = {alpha}")
+        logger.info(f"Processing α = {alpha}")
 
-        # Generate all responses for this alpha in batches
-        responses = generate_batch_with_steering(
-            model,
-            tokenizer,
-            questions,
-            alpha=alpha,
-            directions=directions,
-            component=component,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            batch_size=batch_size,
-        )
+        try:
+            # Generate all responses for this alpha in batches
+            responses = generate_batch_with_steering(
+                model,
+                tokenizer,
+                questions,
+                alpha=alpha,
+                directions=directions,
+                component=component,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                batch_size=batch_size,
+            )
 
-        # Calculate metrics for all responses
-        for i, (response, answer) in enumerate(zip(responses, answers)):
-            metrics = calculate_metrics(response, alpha)
-            metrics["question_id"] = i
-            metrics["is_correct"] = is_correct(response, answer)
-            metrics["response"] = response
-            all_results.append(metrics)
+            # Calculate metrics for all responses
+            for i, (response, answer) in enumerate(zip(responses, answers)):
+                metrics = calculate_metrics(response, alpha)
+                metrics["question_id"] = i
+                metrics["is_correct"] = is_correct(response, answer)
+                metrics["response"] = response
+                all_results.append(metrics)
 
-        print(f"Completed α = {alpha}, processed {len(responses)} examples")
+            logger.info(f"Completed α = {alpha}, processed {len(responses)} examples")
+
+        except Exception as e:
+            logger.error(f"Critical error processing α = {alpha}: {e}")
+            logger.error("Creating placeholder results for this alpha value")
+
+            # Create placeholder results for this alpha
+            for i, answer in enumerate(answers):
+                metrics = {
+                    "alpha": alpha,
+                    "thinking_words": 0,
+                    "thinking_chars": 0,
+                    "question_id": i,
+                    "is_correct": False,
+                    "response": {
+                        "thinking": "",
+                        "response": f"Error processing α={alpha}: {str(e)}",
+                    },
+                }
+                all_results.append(metrics)
 
     return all_results
 
@@ -1135,37 +1334,68 @@ def memory_efficient_main(args):
 
     # Calculate optimal batch size based on available memory
     if hasattr(args, "batch_size"):
-        batch_size = args.batch_size
+        initial_batch_size = args.batch_size
     else:
         # Auto-determine batch size based on model size and available memory
         if torch.cuda.is_available():
             total_memory = torch.cuda.get_device_properties(0).total_memory
             if total_memory > 20e9:  # >20GB
-                batch_size = 8
+                initial_batch_size = 8
             elif total_memory > 10e9:  # >10GB
-                batch_size = 4
+                initial_batch_size = 4
             else:
-                batch_size = 2
+                initial_batch_size = 2
         else:
-            batch_size = 2
+            initial_batch_size = 2
 
-    logger.info(f"Using batch size: {batch_size}")
+    logger.info(f"Starting with batch size: {initial_batch_size}")
 
-    # Efficient batch evaluation
+    # Adaptive batch size - will be reduced if OOM occurs
+    current_batch_size = initial_batch_size
+    min_batch_size = 1
+
+    # Efficient batch evaluation with adaptive batch sizing
     logger.info("Starting efficient batch evaluation...")
-    all_results = evaluate_steering_batch_efficient(
-        model,
-        tokenizer,
-        test_data,
-        directions,
-        args.direction_weights,
-        component=args.component,
-        batch_size=batch_size,
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-    )
+
+    while current_batch_size >= min_batch_size:
+        try:
+            all_results = evaluate_steering_batch_efficient(
+                model,
+                tokenizer,
+                test_data,
+                directions,
+                args.direction_weights,
+                component=args.component,
+                batch_size=current_batch_size,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                top_k=args.top_k,
+            )
+
+            # If we get here, processing was successful
+            logger.info(
+                f"Successfully completed evaluation with batch size {current_batch_size}"
+            )
+            break
+
+        except torch.cuda.OutOfMemoryError as e:
+            logger.warning(f"OOM with batch size {current_batch_size}: {e}")
+            current_batch_size = max(1, current_batch_size // 2)
+            logger.info(f"Reducing batch size to {current_batch_size} and retrying...")
+
+            # Clear cache before retry
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        except Exception as e:
+            logger.error(f"Non-OOM error during evaluation: {e}")
+            logger.error("This error is not related to memory, stopping execution")
+            return None, None
+
+    if current_batch_size < min_batch_size:
+        logger.error("Could not complete evaluation even with minimum batch size")
+        return None, None
 
     # Save results
     results_file = os.path.join(
@@ -1192,6 +1422,7 @@ def memory_efficient_main(args):
 
     logger.info(f"Efficient processing complete! Results saved to {results_file}")
     logger.info(f"Processed {len(all_results)} total examples")
+    logger.info(f"Final batch size used: {current_batch_size}")
 
     return all_results, avg_metrics
 
