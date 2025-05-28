@@ -1011,7 +1011,7 @@ def generate_batch_with_steering(
     if directions is None:
         raise ValueError("Directions must be provided for steering")
 
-    logger = get_logger("generate_batch_with_steering")
+    logger = get_logger()
     all_responses = []
 
     # Process in smaller batches to manage memory
@@ -1222,7 +1222,7 @@ def evaluate_steering_batch_efficient(
     top_k=20,
 ):
     """Efficiently evaluate steering across multiple alpha values using batch processing."""
-    logger = get_logger("evaluate_steering_batch_efficient")
+    logger = get_logger()
     all_results = []
 
     # Extract questions and answers once
