@@ -53,14 +53,14 @@ def parse_args():
     parser.add_argument(
         "--n_short",
         type=int,
-        default=100,
-        help="Number of short thinking examples to use",
+        default=None,
+        help="Number of short thinking examples to use (default: None = use all available)",
     )
     parser.add_argument(
         "--n_long",
         type=int,
-        default=100,
-        help="Number of long thinking examples to use",
+        default=None,
+        help="Number of long thinking examples to use (default: None = use all available)",
     )
     parser.add_argument(
         "--device",
@@ -142,8 +142,8 @@ def compute_thinking_lengths(responses, tokenizer):
 
 def select_examples_by_length(
     responses,
-    n_short=100,
-    n_long=100,
+    n_short=None,
+    n_long=None,
     use_percentiles=False,
     short_percentile=20.0,
     long_percentile=20.0,
@@ -220,26 +220,34 @@ def select_examples_by_length(
     print(f"Found {len(long_thinking_examples)} long thinking examples")
     print(f"Found {len(short_thinking_examples)} short thinking examples")
 
-    # Use available examples (may be less than requested n_short/n_long)
-    short_examples = (
-        short_thinking_examples[:n_short]
-        if len(short_thinking_examples) >= n_short
-        else short_thinking_examples
-    )
-    long_examples = (
-        long_thinking_examples[:n_long]
-        if len(long_thinking_examples) >= n_long
-        else long_thinking_examples
-    )
+    # Use available examples - if n_short/n_long is None, use all available (ThinkEdit style)
+    if n_short is None:
+        short_examples = short_thinking_examples
+        print(f"Using ALL {len(short_examples)} short examples (ThinkEdit style)")
+    else:
+        short_examples = (
+            short_thinking_examples[:n_short]
+            if len(short_thinking_examples) >= n_short
+            else short_thinking_examples
+        )
+        if len(short_examples) < n_short:
+            print(
+                f"Warning: Only {len(short_examples)} short examples available, requested {n_short}"
+            )
 
-    if len(short_examples) < n_short:
-        print(
-            f"Warning: Only {len(short_examples)} short examples available, requested {n_short}"
+    if n_long is None:
+        long_examples = long_thinking_examples
+        print(f"Using ALL {len(long_examples)} long examples (ThinkEdit style)")
+    else:
+        long_examples = (
+            long_thinking_examples[:n_long]
+            if len(long_thinking_examples) >= n_long
+            else long_thinking_examples
         )
-    if len(long_examples) < n_long:
-        print(
-            f"Warning: Only {len(long_examples)} long examples available, requested {n_long}"
-        )
+        if len(long_examples) < n_long:
+            print(
+                f"Warning: Only {len(long_examples)} long examples available, requested {n_long}"
+            )
 
     # Ensure we have at least some examples
     if len(short_examples) == 0 or len(long_examples) == 0:
@@ -562,8 +570,12 @@ def main():
     logger.info("=" * 60)
     logger.info(f"Model: {args.model}")
     logger.info(f"Component: {args.component}")
-    logger.info(f"Short examples: {args.n_short}")
-    logger.info(f"Long examples: {args.n_long}")
+    logger.info(
+        f"Short examples: {args.n_short if args.n_short is not None else 'ALL (ThinkEdit style)'}"
+    )
+    logger.info(
+        f"Long examples: {args.n_long if args.n_long is not None else 'ALL (ThinkEdit style)'}"
+    )
     logger.info(f"Device: {args.device}")
 
     # Log selection method
