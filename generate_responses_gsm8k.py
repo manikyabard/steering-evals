@@ -1,46 +1,36 @@
-# %% [markdown]
-# # Generating Responses from GSM8K
-#
-# This notebook generates and saves model responses from the GSM8K dataset.
-# We'll generate responses with thinking enabled to create our dataset
-# for identifying reasoning length direction.
-#
-# The notebook follows these steps:
-# 1. Load the GSM8K dataset
-# 2. Generate responses with thinking enabled
-# 3. Save the responses for later analysis
-#
-# This implementation uses SGLang for faster inference and parallelization:
-# - Using appropriate sampling parameters (Temperature=0.6, TopP=0.95, TopK=20)
-# - Including step-by-step reasoning instructions
-# - Using the reasoning parser to separate thinking from responses
-# - Batch processing multiple examples in parallel
-# - Connecting to an existing SGLang server
+#!/usr/bin/env python3
+"""
+Generate responses from GSM8K dataset using SGLang.
+
+This script generates and saves model responses from the GSM8K dataset
+with thinking enabled to create datasets for identifying reasoning length direction.
+
+Prerequisites:
+Start the SGLang server in another terminal:
+```bash
+python -m sglang.launch_server \
+    --model-path Qwen/Qwen3-0.6B \
+    --port 30000 \
+    --reasoning-parser qwen3
+```
+"""
 
 # %% [markdown]
-# ## Prerequisites
+# # Generate Responses from GSM8K Dataset
 #
-# Before running this script, start the SGLang server in another terminal:
+# This notebook demonstrates how to generate model responses from the GSM8K math dataset
+# with thinking enabled. We'll walk through the process step by step, from setting up
+# the SGLang server connection to processing responses in parallel.
 #
-# ```bash
-# python -m sglang.launch_server \
-#     --model-path Qwen/Qwen3-0.6B \
-#     --port 30000 \
-#     --reasoning-parser qwen3 \
-# ```
-#
-# You can add other server arguments as needed:
-# - `--attention-backend fa3` to use the FA3 attention backend instead of FlashInfer
-# - `--mem-fraction-static 0.7` to reduce memory usage if you're getting OOM errors
-#
-# See the full list of server options at https://docs.sglang.ai/backend/server_arguments.html
+# ## Overview
+# The process involves:
+# 1. Setting up connection to SGLang server
+# 2. Loading the GSM8K dataset
+# 3. Generating responses with thinking enabled
+# 4. Processing responses in parallel batches
+# 5. Saving results for later analysis
 
-# %% [markdown]
-# ## Setup
-#
-# First, let's import the necessary libraries and set up the argument parser.
-
-# %%
+# %% Setup and imports
 import os
 import json
 import torch
@@ -53,32 +43,13 @@ from transformers import AutoTokenizer
 import sglang as sgl
 from logging_setup import setup_logging, get_logger
 
-# Display installed versions for reproducibility
-import sys
-
-print(f"Python version: {sys.version}")
-print(f"PyTorch version: {torch.__version__}")
-try:
-    import transformers
-
-    print(f"Transformers version: {transformers.__version__}")
-except:
-    print("Transformers not installed")
-try:
-    import sglang
-
-    print(f"SGLang version: {sglang.__version__}")
-except:
-    print("SGLang not installed")
-
 # %% [markdown]
-# ## Command Line Arguments
+# ## Configuration and Arguments
 #
-# When running this as a script, you can provide command-line arguments.
-# In notebook mode, we'll define default values that you can modify in the next cell.
+# First, let's set up the configuration parameters for our generation process.
 
 
-# %%
+# %% Command line argument parsing
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Generate responses from GSM8K dataset using SGLang"
@@ -95,32 +66,32 @@ def parse_args():
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=2000,  # Similar to ThinkEdit paper
+        default=2000,
         help="Number of samples to process from GSM8K",
     )
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=32768,  # Recommended for Qwen models
+        default=32768,
         help="Maximum number of new tokens to generate",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.6,  # Recommended for thinking mode
+        default=0.6,
         help="Temperature for sampling",
     )
     parser.add_argument(
         "--top_p",
         type=float,
-        default=0.95,  # Recommended for thinking mode
+        default=0.95,
         help="Top-p (nucleus) sampling parameter",
     )
     parser.add_argument(
         "--top_k",
         type=float,
-        default=20,  # Recommended for thinking mode
+        default=20,
         help="Top-k sampling parameter",
     )
     parser.add_argument(
@@ -138,60 +109,39 @@ def parse_args():
     return parser.parse_args()
 
 
-# %% [markdown]
-# ## Interactive Configuration
-#
-# If you're running this as a notebook, you can modify these parameters directly.
-# Change the values in this cell to customize your experiment.
+# %% Interactive configuration (for notebook use)
+# Uncomment and modify this cell when running interactively in a notebook
+"""
+# Test configuration for interactive development
+test_args = type('Args', (), {
+    'model': "Qwen/Qwen3-0.6B",
+    'output_dir': "responses",
+    'num_samples': 5,  # Small number for testing
+    'max_new_tokens': 32768,
+    'seed': 42,
+    'temperature': 0.6,
+    'top_p': 0.95,
+    'top_k': 20,
+    'batch_size': 4,
+    'server_url': "http://localhost:30000"
+})()
 
-
-# %%
-# Interactive notebook parameters - modify these values as needed
-class NotebookArgs:
-    def __init__(self):
-        self.model = "Qwen/Qwen3-0.6B"  # Model to use
-        self.output_dir = "responses"  # Directory to save responses
-        self.num_samples = 5  # Use a small number for quick testing
-        self.max_new_tokens = 32768  # Recommended for Qwen models
-        self.seed = 42  # Random seed for reproducibility
-        self.temperature = 0.6  # Recommended for thinking mode
-        self.top_p = 0.95  # Recommended for thinking mode
-        self.top_k = 20  # Recommended for thinking mode
-        self.batch_size = 4  # Process multiple requests in parallel
-        self.server_url = "http://localhost:30000"  # URL of the SGLang server
-
-
-# Use NotebookArgs when running as notebook, otherwise parse command line arguments
-import sys
-
-if "ipykernel" in sys.modules:
-    args = NotebookArgs()
-    print("Running in notebook mode with these parameters:")
-    print(f"- Model: {args.model}")
-    print(f"- Number of samples: {args.num_samples}")
-    print(f"- Output directory: {args.output_dir}")
-    print(f"- Temperature: {args.temperature}")
-    print(f"- Top-p: {args.top_p}")
-    print(f"- Top-k: {args.top_k}")
-    print(f"- Batch size: {args.batch_size}")
-    print(f"- Server URL: {args.server_url}")
-else:
-    args = parse_args()
-    print("Running in script mode with parsed arguments")
+# Use test_args instead of parse_args() when running interactively
+# args = test_args
+"""
 
 # %% [markdown]
-# ## Load and Prepare the GSM8K Dataset
+# ## Step 1: Dataset Loading
 #
-# Now we'll load the GSM8K dataset and take a subset for our experiments.
+# Let's start by loading the GSM8K dataset and examining its structure.
 
 
-# %%
+# %% Dataset loading functions
 def load_gsm8k_dataset(num_samples, seed=42):
     """Load and prepare the GSM8K dataset."""
     print(f"Loading GSM8K with num_samples={num_samples}")
     gsm8k = load_dataset("openai/gsm8k", "main", split="train")
 
-    # Shuffle and select subset if needed
     if num_samples and num_samples < len(gsm8k):
         gsm8k = gsm8k.shuffle(seed=seed).select(range(num_samples))
         print(f"Selected {num_samples} examples after shuffling")
@@ -199,76 +149,88 @@ def load_gsm8k_dataset(num_samples, seed=42):
     return gsm8k
 
 
-# %%
-# Let's load the dataset and examine a sample
-dataset = load_gsm8k_dataset(args.num_samples, args.seed)
-print(f"Loaded {len(dataset)} examples from GSM8K")
+# %% Test data loading (uncomment to test interactively)
+"""
+def test_data_loading():
+    \"\"\"Test loading a small sample of GSM8K data.\"\"\"
+    try:
+        print("Testing data loading...")
+        dataset = load_gsm8k_dataset(num_samples=3, seed=42)
+        print(f"✓ Loaded {len(dataset)} examples")
+        
+        # Show sample data
+        for i, example in enumerate(dataset[:2]):
+            print(f"\\nExample {i+1}:")
+            print(f"  Question: {example['question']}")
+            print(f"  Answer: {example['answer']}")
+        
+    except Exception as e:
+        print(f"Data loading test failed: {e}")
 
-# Display an example
-if len(dataset) > 0:
-    example = dataset[0]
-    print("\nExample problem:")
-    print("-" * 50)
-    print(f"Question: {example['question']}")
-    print(f"Answer: {example['answer']}")
+# Uncomment to test:
+# test_data_loading()
+"""
 
 # %% [markdown]
-# ## Connect to SGLang Server
+# ## Step 2: Server Connection
 #
-# Let's connect to the SGLang server that's already running.
+# Next, we need to establish a connection to the SGLang server.
+# Make sure the server is running before proceeding.
 
 
-# %%
+# %% Server connection functions
 def connect_to_sglang(server_url):
     """Test connection to the SGLang server."""
     print(f"Testing connection to SGLang server at {server_url}...")
 
     try:
-        # Test the connection with a health check
         response = requests.get(f"{server_url}/health")
         response.raise_for_status()
         print(f"Successfully connected to SGLang server at {server_url}")
-
         return server_url
     except Exception as e:
         print(f"Error connecting to SGLang server: {e}")
-        print("\nPlease ensure the SGLang server is running in another terminal with:")
-        print(
-            f"""
-python -m sglang.launch_server \\
-    --model-path {args.model} \\
-    --host 0.0.0.0 \\
-    --port 30000 \\
-    --reasoning-parser qwen3 \\
-    --disable-cuda-graph
-        """
-        )
+        print("\nPlease ensure the SGLang server is running in another terminal.")
         raise
 
 
+# %% Test server connection (uncomment to test interactively)
+"""
+def test_server_connection():
+    \"\"\"Test connection to SGLang server.\"\"\"
+    try:
+        print("Testing server connection...")
+        server_url = connect_to_sglang("http://localhost:30000")
+        print(f"✓ Connected to SGLang server at {server_url}")
+        
+    except Exception as e:
+        print(f"Server connection test failed: {e}")
+        print("Make sure the SGLang server is running:")
+        print("python -m sglang.launch_server --model-path Qwen/Qwen3-0.6B --port 30000 --reasoning-parser qwen3")
+
+# Uncomment to test:
+# test_server_connection()
+"""
+
 # %% [markdown]
-# ## Generate Responses
+# ## Step 3: Response Generation
 #
-# Now let's define a function to generate responses from our model with thinking enabled
-# using SGLang's reasoning parser capabilities.
+# Now we'll implement the core response generation functionality.
+# This includes generating responses with thinking and parsing the results.
 
 
-# %%
+# %% Response generation functions
 def generate_response(server_url, tokenizer, question):
     """Generate a response from the model with thinking enabled using direct HTTP requests."""
-    # Include step-by-step reasoning instructions as recommended
     prompt = f"Solve this math problem step by step, and put your final answer within \\boxed{{}}:\n{question}"
 
     messages = [{"role": "user", "content": prompt}]
-
-    # Format the prompt using the model's chat template
     text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
     )
 
-    # Define request payload for generation
     generate_payload = {
         "text": text,
         "sampling_params": {
@@ -279,9 +241,7 @@ def generate_response(server_url, tokenizer, question):
         },
     }
 
-    # Generate with SGLang's API via direct HTTP request
     try:
-        # Generate the text
         response = requests.post(f"{server_url}/generate", json=generate_payload)
         response.raise_for_status()
         result = response.json()
@@ -309,7 +269,6 @@ def generate_response(server_url, tokenizer, question):
         }
     except Exception as e:
         print(f"Error in generation: {e}")
-        # If there's an issue with the reasoning parser, try to return the full text
         return {
             "thinking": "",
             "response": (
@@ -318,29 +277,62 @@ def generate_response(server_url, tokenizer, question):
         }
 
 
+# %% Test single generation (uncomment to test interactively)
+"""
+def test_single_example():
+    \"\"\"Test with a simple math problem.\"\"\"
+    try:
+        print("Testing single example generation...")
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+        
+        # Test server connection
+        response = requests.get("http://localhost:30000/health")
+        response.raise_for_status()
+        print(f"✓ Connected to SGLang server")
+        
+        test_question = "If there are 5 apples and 3 are eaten, how many remain?"
+        
+        # Note: This requires args to be defined globally
+        global args
+        args = type('Args', (), {
+            'max_new_tokens': 1024,
+            'temperature': 0.6,
+            'top_p': 0.95,
+            'top_k': 20
+        })()
+        
+        result = generate_response("http://localhost:30000", tokenizer, test_question)
+        
+        print(f"\\nQuestion: {test_question}")
+        print(f"Thinking length: {len(result['thinking'].split())} words")
+        print(f"Thinking: {result['thinking'][:200]}...")
+        print(f"Response: {result['response']}")
+        
+    except Exception as e:
+        print(f"Test failed: {e}")
+
+# Uncomment to test:
+# test_single_example()
+"""
+
 # %% [markdown]
-# ## Process Multiple Requests in Parallel
+# ## Step 4: Batch Processing
 #
-# Let's define a function to process batches of examples in parallel.
+# For efficiency, we'll process multiple examples in parallel batches.
 
 
-# %%
+# %% Batch processing functions
 def process_batch(server_url, tokenizer, batch, start_idx):
     """Process a batch of examples in parallel."""
     results = []
-
-    # Extract the lists of questions and answers from the batch
     questions = batch["question"]
     answers = batch["answer"]
 
-    # Create a thread pool to process the batch
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(questions)) as executor:
         future_to_idx = {}
 
         for i, question in enumerate(questions):
             answer = answers[i] if i < len(answers) else ""
-
-            # Submit the task to the executor
             future = executor.submit(generate_response, server_url, tokenizer, question)
             future_to_idx[future] = (i, question, answer)
 
@@ -353,7 +345,6 @@ def process_batch(server_url, tokenizer, batch, start_idx):
             try:
                 thinking_result = future.result()
 
-                # Save the results
                 output = {
                     "id": start_idx + i,
                     "question": question,
@@ -364,7 +355,6 @@ def process_batch(server_url, tokenizer, batch, start_idx):
 
             except Exception as e:
                 print(f"Error processing example {start_idx + i}: {e}")
-                # Add a placeholder for failed requests
                 output = {
                     "id": start_idx + i,
                     "question": question,
@@ -377,96 +367,77 @@ def process_batch(server_url, tokenizer, batch, start_idx):
     return results
 
 
-# %% [markdown]
-# ## Test the Model on a Single Example
-#
-# Let's first test the model on a single example to make sure everything is working properly.
+# %% Test batch processing (uncomment to test interactively)
+"""
+def test_batch_processing():
+    \"\"\"Test batch processing with a small sample.\"\"\"
+    try:
+        print("Testing batch processing...")
+        
+        # Load small dataset
+        dataset = load_gsm8k_dataset(num_samples=3, seed=42)
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+        
+        # Set up global args for generation
+        global args
+        args = type('Args', (), {
+            'max_new_tokens': 1024,
+            'temperature': 0.6,
+            'top_p': 0.95,
+            'top_k': 20
+        })()
+        
+        # Process as a batch
+        batch = {
+            "question": [ex["question"] for ex in dataset],
+            "answer": [ex["answer"] for ex in dataset]
+        }
+        
+        results = process_batch("http://localhost:30000", tokenizer, batch, 0)
+        
+        print(f"✓ Processed {len(results)} examples in batch")
+        
+        for i, result in enumerate(results):
+            thinking_len = len(result["with_thinking"]["thinking"].split())
+            print(f"  Example {i+1}: {thinking_len} thinking words")
+        
+    except Exception as e:
+        print(f"Batch processing test failed: {e}")
 
-# %%
-# Test with a simple problem
-try:
-    print("Setting up connection to SGLang server...")
-    # Initialize tokenizer directly
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-
-    # Connect to the SGLang server
-    server_url = args.server_url
-
-    # Test server connection
-    response = requests.get(f"{server_url}/health")
-    response.raise_for_status()
-    print(f"Successfully connected to SGLang server at {server_url}")
-
-    test_question = "If there are 5 apples and 3 are eaten, how many remain?"
-
-    # Generate with thinking enabled
-    print("\nGenerating response with thinking enabled...")
-
-    # Use the same generate_response function as used for the full dataset
-    thinking_result = generate_response(server_url, tokenizer, test_question)
-
-    print("\nThinking content:")
-    print("-" * 50)
-    print(thinking_result["thinking"])
-
-    print("\nResponse content:")
-    print("-" * 50)
-    print(thinking_result["response"])
-
-except Exception as e:
-    print(f"Error testing the model: {e}")
-    print(f"Type of error: {type(e)}")
-    if hasattr(e, "response") and hasattr(e.response, "text"):
-        print(f"Response content: {e.response.text}")
-    print(
-        "Please ensure the SGLang server is running in another terminal before executing this script."
-    )
+# Uncomment to test:
+# test_batch_processing()
+"""
 
 # %% [markdown]
-# ## Main Function
+# ## Step 5: Main Processing Pipeline
 #
-# Now let's define the main function to process the whole dataset and save the responses.
+# This brings everything together into a complete pipeline.
 
 
-# %%
+# %% Main processing function
 def main(args):
     """Main function to process GSM8K examples and save responses in parallel."""
-    # Setup logging
     logger = setup_logging("generate_responses_gsm8k")
 
-    # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
     logger.info(f"Output directory: {args.output_dir}")
     model_short_name = args.model.split("/")[-1]
 
-    # Load tokenizer for creating prompts
     logger.info(f"Loading tokenizer for {args.model}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
-    # Connect to SGLang server
     try:
         server_url = connect_to_sglang(args.server_url)
 
-        # Load dataset
         logger.info(f"Loading GSM8K dataset...")
         dataset = load_gsm8k_dataset(args.num_samples, args.seed)
 
-        # Debug dataset structure
         logger.info(f"Dataset has {len(dataset)} examples")
-        logger.debug(f"Dataset features: {dataset.features}")
-        if len(dataset) > 0:
-            logger.debug(f"Sample batch keys: {list(dataset[0:1].keys())}")
-            logger.debug(
-                f"Number of questions in sample: {len(dataset[0:1]['question'])}"
-            )
-            logger.debug(f"First question: {dataset[0:1]['question'][0]}")
 
-        # Take a subset of the dataset based on num_samples
         if args.num_samples < len(dataset):
             dataset = dataset.select(range(args.num_samples))
             logger.info(f"Selected {args.num_samples} examples from the dataset")
 
-        # Process dataset in batches
         outputs = []
         num_examples = len(dataset)
         for i in range(0, num_examples, args.batch_size):
@@ -478,7 +449,7 @@ def main(args):
             batch_results = process_batch(server_url, tokenizer, batch, i)
             outputs.extend(batch_results)
 
-            # Save all responses to a JSON file after each batch
+            # Save responses after each batch
             output_path = os.path.join(
                 args.output_dir, f"{model_short_name}_gsm8k_responses.json"
             )
@@ -499,36 +470,24 @@ def main(args):
 
 
 # %% [markdown]
-# ## Execute the Main Function
+# ## Summary and Next Steps
 #
-# Let's run our main function to generate and save the responses.
-# With SGLang, this should be significantly faster than the original implementation
-# due to parallelization and optimized inference.
+# Congratulations! You've successfully generated model responses from GSM8K.
+#
+# **What we accomplished:**
+# 1. Connected to the SGLang server
+# 2. Loaded the GSM8K dataset
+# 3. Generated responses with thinking enabled
+# 4. Processed examples in parallel batches
+# 5. Saved results for further analysis
+#
+# **Next steps:**
+# - Use the generated responses with `extract_reasoning_length_direction_improved.py`
+# - Analyze the distribution of thinking lengths
+# - Experiment with different generation parameters
+# - Scale up to larger datasets
 
-# %%
-# Execute the main function when running as a script or if explicitly requested
-if __name__ == "__main__" or "ipykernel" in sys.modules:
-    if "ipykernel" in sys.modules:
-        print("Running in notebook mode, processing a few examples...")
-        # Use a smaller number of samples for interactive testing
-        args.num_samples = min(args.num_samples, 5)
-
+# %% Script execution
+if __name__ == "__main__":
+    args = parse_args()
     outputs = main(args)
-
-    # In notebook mode, let's also examine the first saved response
-    if "ipykernel" in sys.modules and outputs and len(outputs) > 0:
-        print("\nExample of a saved response:")
-        print("-" * 50)
-        print(f"Question: {outputs[0]['question']}")
-        print(f"\nThinking: {outputs[0]['with_thinking']['thinking'][:200]}...")
-        print(
-            f"\nResponse (with thinking): {outputs[0]['with_thinking']['response'][:200]}..."
-        )
-
-# %% [markdown]
-# ## Next Steps
-#
-# Now that we've generated responses with thinking using SGLang's parallel processing,
-# we can use this data to extract the reasoning length direction.
-#
-# Continue to the next notebook: `extract_reasoning_length_direction.py`

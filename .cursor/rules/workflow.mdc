@@ -5,3 +5,4 @@ alwaysApply: false
 ---
 Use `steer` conda environment. 
 Add new requirements in `requirements.txt` as well.
+Use minimal but all required changes while editing/creating files.
