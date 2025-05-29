@@ -76,7 +76,7 @@ def parse_args():
         "--direction_weights",
         nargs="+",
         type=float,
-        default=[-0.08, -0.04, 0, 0.04, 0.08],
+        default=[-0.08, 0, 0.08],
         help="Direction weights to apply (alpha values)",
     )
     parser.add_argument(
