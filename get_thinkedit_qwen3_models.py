@@ -145,7 +145,7 @@ def main():
     args = parse_args()
 
     # Set up logging
-    logger = get_logger(__name__)
+    logger = get_logger()
 
     # Set up device
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
