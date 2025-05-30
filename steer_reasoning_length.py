@@ -147,6 +147,12 @@ def parse_args():
         action="store_true",
         help="Start fresh, ignoring any existing intermediate results",
     )
+    parser.add_argument(
+        "--checkpoint_frequency",
+        type=int,
+        default=10,
+        help="Save intermediate results every N batches (default: 10)",
+    )
     return parser.parse_args()
 
 
@@ -172,7 +178,8 @@ test_args = type('Args', (), {
     'seed': 42,
     'device': "cuda:0" if torch.cuda.is_available() else "cpu",
     'resume': True,
-    'no_resume': False
+    'no_resume': False,
+    'checkpoint_frequency': 5  # Save every 5 batches for testing
 })()
 
 # Use test_args instead of parse_args() when running interactively
@@ -449,7 +456,8 @@ def test_single_steering():
 # %% Data loading and evaluation functions
 def load_test_data(num_samples=10, seed=42):
     """Load and prepare the GSM8K test dataset."""
-    test_data = load_dataset("openai/gsm8k", "main", split="test[:200]")
+    # test_data = load_dataset("openai/gsm8k", "main", split="test[:200]")
+    test_data = load_dataset("openai/gsm8k", "main", split=f"test[:{num_samples}]")
     return test_data
 
 
@@ -646,9 +654,60 @@ def test_visualization():
 """
 
 # %% [markdown]
-# ## Step 6: Batch Processing
+# ## Step 6: Batch Processing with Checkpointing
 #
-# For efficiency, we'll implement batch processing capabilities.
+# For efficiency and fault tolerance, we implement batch processing with frequent checkpointing.
+#
+# **Checkpointing Strategy:**
+# - Save intermediate results every N batches (configurable via `--checkpoint_frequency`)
+# - Resume from partial completion of alpha values
+# - Save after errors to preserve progress
+# - Clean up intermediate files only after successful completion
+#
+# **When Outputs Are Saved:**
+# 1. **During Alpha Processing**: Every N batches (default: 10 batches = 40 examples)
+# 2. **After Each Alpha Completes**: Final save for that alpha value
+# 3. **After Errors**: Save progress even if processing fails
+# 4. **Final Results**: Complete results file + visualization
+# 5. **Resume Support**: Can restart from any partial completion point
+
+
+# %% Helper function for intermediate saving
+def save_intermediate_results(all_results, intermediate_file, logger=None):
+    """Helper function to save intermediate results to file."""
+    if not intermediate_file:
+        return False
+
+    if logger is None:
+        logger = get_logger()
+
+    try:
+        serializable_results = []
+        for r in all_results:
+            result_copy = r.copy()
+            # Ensure response is properly serializable
+            if isinstance(r["response"], dict):
+                result_copy["response"] = {
+                    "thinking": r["response"].get("thinking", ""),
+                    "response": r["response"].get("response", ""),
+                }
+            else:
+                # Handle edge case where response might be a string or other type
+                result_copy["response"] = {
+                    "thinking": "",
+                    "response": str(r["response"]),
+                }
+            serializable_results.append(result_copy)
+
+        with open(intermediate_file, "w") as f:
+            json.dump(serializable_results, f, indent=2)
+        logger.info(
+            f"Saved intermediate results to {intermediate_file} ({len(all_results)} results)"
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to save intermediate results: {e}")
+        return False
 
 
 # %% Batch processing functions
@@ -664,18 +723,30 @@ def generate_batch_with_steering(
     top_p=0.95,
     top_k=20,
     batch_size=4,
+    # NEW: Checkpoint parameters
+    intermediate_file=None,
+    all_results=None,
+    answers=None,
+    checkpoint_frequency=10,  # Save every N batches
+    start_question_idx=0,  # For resuming partial alpha processing
 ):
-    """Generate responses for a batch of questions with steering applied."""
+    """Generate responses for a batch of questions with steering applied.
+
+    Enhanced version that supports checkpointing during processing.
+    """
     if directions is None:
         raise ValueError("Directions must be provided for steering")
 
     logger = get_logger()
     all_responses = []
 
-    for i in range(0, len(questions), batch_size):
+    for i in range(start_question_idx, len(questions), batch_size):
         batch_questions = questions[i : i + batch_size]
+        batch_num = (i // batch_size) + 1
+        total_batches = (len(questions) + batch_size - 1) // batch_size
+
         logger.info(
-            f"Processing batch {i//batch_size + 1}, questions {i+1}-{min(i+batch_size, len(questions))}"
+            f"Processing batch {batch_num}/{total_batches}, questions {i+1}-{min(i+batch_size, len(questions))} (α={alpha})"
         )
 
         try:
@@ -765,10 +836,36 @@ def generate_batch_with_steering(
                         batch_responses.append({"thinking": "", "response": content})
 
                 all_responses.extend(batch_responses)
-                logger.info(f"Successfully processed batch {i//batch_size + 1}")
+                logger.info(f"Successfully processed batch {batch_num}/{total_batches}")
+
+                # NEW: Process and save checkpoint after each batch if enabled
+                if (
+                    all_results is not None
+                    and answers is not None
+                    and intermediate_file
+                ):
+                    # Process the batch responses and add to all_results
+                    batch_start_idx = len(all_responses) - len(batch_responses)
+                    for resp_idx, (response, answer) in enumerate(
+                        zip(batch_responses, answers[i : i + len(batch_responses)])
+                    ):
+                        metrics = calculate_metrics(response, alpha)
+                        metrics["question_id"] = i + resp_idx
+                        metrics["is_correct"] = is_correct(response, answer)
+                        metrics["response"] = response
+                        all_results.append(metrics)
+
+                    # Save checkpoint every N batches
+                    if batch_num % checkpoint_frequency == 0:
+                        save_intermediate_results(
+                            all_results, intermediate_file, logger
+                        )
+                        logger.info(
+                            f"Checkpoint saved after batch {batch_num} for α={alpha}"
+                        )
 
             except torch.cuda.OutOfMemoryError as e:
-                logger.error(f"CUDA OOM error in batch {i//batch_size + 1}: {e}")
+                logger.error(f"CUDA OOM error in batch {batch_num}: {e}")
                 logger.info("Falling back to single-question processing for this batch")
                 batch_responses = []
                 for j, question in enumerate(batch_questions):
@@ -798,16 +895,53 @@ def generate_batch_with_steering(
 
                 all_responses.extend(batch_responses)
 
+                # Save checkpoint even after OOM recovery
+                if (
+                    all_results is not None
+                    and answers is not None
+                    and intermediate_file
+                ):
+                    batch_start_idx = len(all_responses) - len(batch_responses)
+                    for resp_idx, (response, answer) in enumerate(
+                        zip(batch_responses, answers[i : i + len(batch_responses)])
+                    ):
+                        metrics = calculate_metrics(response, alpha)
+                        metrics["question_id"] = i + resp_idx
+                        metrics["is_correct"] = is_correct(response, answer)
+                        metrics["response"] = response
+                        all_results.append(metrics)
+
+                    save_intermediate_results(all_results, intermediate_file, logger)
+                    logger.info(
+                        f"Checkpoint saved after OOM recovery in batch {batch_num} for α={alpha}"
+                    )
+
             finally:
                 remove_steering_layers(hooks)
 
         except Exception as e:
-            logger.error(f"Error setting up batch {i//batch_size + 1}: {e}")
+            logger.error(f"Error setting up batch {batch_num}: {e}")
             empty_responses = [
                 {"thinking": "", "response": f"Setup error: {str(e)}"}
                 for _ in batch_questions
             ]
             all_responses.extend(empty_responses)
+
+            # Save checkpoint even after setup error
+            if all_results is not None and answers is not None and intermediate_file:
+                for resp_idx, (response, answer) in enumerate(
+                    zip(empty_responses, answers[i : i + len(empty_responses)])
+                ):
+                    metrics = calculate_metrics(response, alpha)
+                    metrics["question_id"] = i + resp_idx
+                    metrics["is_correct"] = False  # Setup error means incorrect
+                    metrics["response"] = response
+                    all_results.append(metrics)
+
+                save_intermediate_results(all_results, intermediate_file, logger)
+                logger.info(
+                    f"Checkpoint saved after setup error in batch {batch_num} for α={alpha}"
+                )
 
         finally:
             if "inputs" in locals():
@@ -842,6 +976,7 @@ def evaluate_steering_batch_efficient(
     output_dir=None,
     model_short_name=None,
     resume_from_existing=True,
+    checkpoint_frequency=10,  # NEW: Save every N batches
 ):
     """Efficiently evaluate steering across multiple alpha values using batch processing."""
     logger = get_logger()
@@ -850,32 +985,101 @@ def evaluate_steering_batch_efficient(
     questions = [example["question"] for example in test_data]
     answers = [example["answer"] for example in test_data]
 
+    # Ensure output directory exists
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
     if output_dir and model_short_name:
         intermediate_file = os.path.join(
             output_dir, f"{model_short_name}_{component}_steering_intermediate.json"
         )
 
         existing_alphas = set()
+        completed_questions_per_alpha = {}  # NEW: Track partial progress
+
         if resume_from_existing and os.path.exists(intermediate_file):
             try:
                 with open(intermediate_file, "r") as f:
-                    existing_results = json.load(f)
-                    all_results.extend(existing_results)
-                    existing_alphas = set(r["alpha"] for r in existing_results)
-                    logger.info(
-                        f"Resuming from existing results. Found {len(existing_results)} previous results for alphas: {sorted(existing_alphas)}"
-                    )
+                    existing_data = json.load(f)
+                    # Validate structure of loaded data
+                    if isinstance(existing_data, list) and existing_data:
+                        # Check if first item has expected structure
+                        first_item = existing_data[0]
+                        if all(
+                            key in first_item
+                            for key in [
+                                "alpha",
+                                "thinking_words",
+                                "thinking_chars",
+                                "question_id",
+                                "is_correct",
+                                "response",
+                            ]
+                        ):
+                            all_results.extend(existing_data)
+
+                            # NEW: Track progress per alpha value
+                            for result in existing_data:
+                                alpha = result["alpha"]
+                                if alpha not in completed_questions_per_alpha:
+                                    completed_questions_per_alpha[alpha] = set()
+                                completed_questions_per_alpha[alpha].add(
+                                    result["question_id"]
+                                )
+
+                            # Mark alphas as fully completed
+                            for alpha in alpha_values:
+                                if alpha in completed_questions_per_alpha:
+                                    completed_count = len(
+                                        completed_questions_per_alpha[alpha]
+                                    )
+                                    if completed_count == len(questions):
+                                        existing_alphas.add(alpha)
+                                        logger.info(
+                                            f"α={alpha} fully completed ({completed_count}/{len(questions)} examples)"
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"α={alpha} partially completed ({completed_count}/{len(questions)} examples)"
+                                        )
+
+                            if existing_alphas:
+                                logger.info(
+                                    f"Resuming from existing results. Fully completed alphas: {sorted(existing_alphas)}"
+                                )
+
+                        else:
+                            logger.warning(
+                                "Existing intermediate file has invalid structure, starting fresh"
+                            )
+                    else:
+                        logger.warning(
+                            "Existing intermediate file is empty or invalid, starting fresh"
+                        )
             except Exception as e:
                 logger.warning(f"Could not load existing intermediate results: {e}")
     else:
         intermediate_file = None
+        existing_alphas = set()
+        completed_questions_per_alpha = {}
 
     for alpha in tqdm(alpha_values, desc="Testing steering strengths"):
         if alpha in existing_alphas:
-            logger.info(f"Skipping α = {alpha} (already processed)")
+            logger.info(f"Skipping α = {alpha} (already fully processed)")
             continue
 
-        logger.info(f"Processing α = {alpha}")
+        # NEW: Handle partial completion
+        start_question_idx = 0
+        if alpha in completed_questions_per_alpha:
+            completed_questions = completed_questions_per_alpha[alpha]
+            # Find the last consecutive completed question
+            for i in range(len(questions)):
+                if i not in completed_questions:
+                    start_question_idx = i
+                    break
+            logger.info(f"Resuming α = {alpha} from question {start_question_idx + 1}")
+        else:
+            logger.info(f"Starting α = {alpha} from the beginning")
 
         try:
             responses = generate_batch_with_steering(
@@ -890,39 +1094,52 @@ def evaluate_steering_batch_efficient(
                 top_p=top_p,
                 top_k=top_k,
                 batch_size=batch_size,
+                # NEW: Pass checkpoint parameters
+                intermediate_file=intermediate_file,
+                all_results=all_results,
+                answers=answers,
+                checkpoint_frequency=checkpoint_frequency,
+                start_question_idx=start_question_idx,
             )
 
-            alpha_results = []
-            for i, (response, answer) in enumerate(zip(responses, answers)):
-                metrics = calculate_metrics(response, alpha)
-                metrics["question_id"] = i
-                metrics["is_correct"] = is_correct(response, answer)
-                metrics["response"] = response
-                alpha_results.append(metrics)
-                all_results.append(metrics)
+            # NEW: Only process responses that weren't already checkpointed
+            if start_question_idx == 0:
+                # All responses were processed and checkpointed within generate_batch_with_steering
+                logger.info(
+                    f"Completed α = {alpha}, processed {len(responses)} examples (with checkpointing)"
+                )
+            else:
+                # Process any remaining responses that weren't checkpointed
+                remaining_responses = responses[start_question_idx:]
+                remaining_answers = answers[start_question_idx:]
 
-            logger.info(f"Completed α = {alpha}, processed {len(responses)} examples")
+                for i, (response, answer) in enumerate(
+                    zip(remaining_responses, remaining_answers)
+                ):
+                    metrics = calculate_metrics(response, alpha)
+                    metrics["question_id"] = start_question_idx + i
+                    metrics["is_correct"] = is_correct(response, answer)
+                    metrics["response"] = response
+                    all_results.append(metrics)
 
+                logger.info(
+                    f"Completed α = {alpha}, processed {len(responses)} examples ({len(remaining_responses)} new)"
+                )
+
+            # Final save after completing this alpha
             if intermediate_file:
-                try:
-                    serializable_results = []
-                    for r in all_results:
-                        result_copy = r.copy()
-                        result_copy["response"] = {
-                            "thinking": r["response"]["thinking"],
-                            "response": r["response"]["response"],
-                        }
-                        serializable_results.append(result_copy)
-
-                    with open(intermediate_file, "w") as f:
-                        json.dump(serializable_results, f, indent=2)
-                    logger.info(f"Saved intermediate results to {intermediate_file}")
-                except Exception as e:
-                    logger.warning(f"Failed to save intermediate results: {e}")
+                save_intermediate_results(all_results, intermediate_file, logger)
 
         except Exception as e:
             logger.error(f"Critical error processing α = {alpha}: {e}")
-            for i, answer in enumerate(answers):
+            # Add error entries for remaining questions only
+            if alpha in completed_questions_per_alpha:
+                completed_questions = completed_questions_per_alpha[alpha]
+                start_idx = max(completed_questions) + 1 if completed_questions else 0
+            else:
+                start_idx = 0
+
+            for i in range(start_idx, len(answers)):
                 metrics = {
                     "alpha": alpha,
                     "thinking_words": 0,
@@ -936,23 +1153,36 @@ def evaluate_steering_batch_efficient(
                 }
                 all_results.append(metrics)
 
+            # Save intermediate results even on error
+            if intermediate_file:
+                save_intermediate_results(all_results, intermediate_file, logger)
+
+    # Save final results
     results_file = os.path.join(
         output_dir,
         f"{model_short_name}_{component}_steering_results_efficient.json",
     )
 
+    # Use the helper function for final save too
     serializable_results = []
     for r in all_results:
         result_copy = r.copy()
-        result_copy["response"] = {
-            "thinking": r["response"]["thinking"],
-            "response": r["response"]["response"],
-        }
+        if isinstance(r["response"], dict):
+            result_copy["response"] = {
+                "thinking": r["response"].get("thinking", ""),
+                "response": r["response"].get("response", ""),
+            }
+        else:
+            result_copy["response"] = {
+                "thinking": "",
+                "response": str(r["response"]),
+            }
         serializable_results.append(result_copy)
 
     with open(results_file, "w") as f:
         json.dump(serializable_results, f, indent=2)
 
+    # Clean up intermediate file only after successful completion
     if intermediate_file and os.path.exists(intermediate_file):
         try:
             os.remove(intermediate_file)
@@ -966,6 +1196,7 @@ def evaluate_steering_batch_efficient(
     logger.info(f"Efficient processing complete! Results saved to {results_file}")
     logger.info(f"Processed {len(all_results)} total examples")
     logger.info(f"Final batch size used: {batch_size}")
+    logger.info(f"Checkpoint frequency: every {checkpoint_frequency} batches")
 
     return all_results, avg_metrics
 
@@ -1057,6 +1288,7 @@ def memory_efficient_main(args):
                 output_dir=args.output_dir,
                 model_short_name=model_short_name,
                 resume_from_existing=resume_from_existing,
+                checkpoint_frequency=args.checkpoint_frequency,
             )
 
             logger.info(
