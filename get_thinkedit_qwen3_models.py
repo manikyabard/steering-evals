@@ -172,7 +172,8 @@ def main():
 
     # Get model configuration
     num_heads = model.config.num_attention_heads
-    head_dim = model.config.hidden_size // num_heads
+    # Use the actual head_dim from config if available, otherwise calculate
+    head_dim = getattr(model.config, "head_dim", model.config.hidden_size // num_heads)
     hidden_size = model.config.hidden_size
 
     logger.info(
@@ -252,7 +253,7 @@ def main():
         # Apply intervention
         W_o_modified, proj_before, proj_after = remove_projection_along_direction(
             W_o,
-            thinking_length_direction[layer_idx, 0].float(),
+            thinking_length_direction[layer_idx, :].float(),
             args.intervention_weight,
         )
 
