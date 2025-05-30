@@ -211,10 +211,10 @@ def main():
     num_layers = model.config.num_hidden_layers
     hidden_size = model.config.hidden_size
     num_heads = model.config.num_attention_heads
-    head_dim = hidden_size // num_heads
+    head_dim = getattr(model.config, "head_dim", hidden_size // num_heads)
 
     logger.info(
-        f"Model config: {num_layers} layers, {num_heads} heads, {head_dim} head_dim"
+        f"Model config: {num_layers} layers, {num_heads} heads, {head_dim} head_dim, {hidden_size} hidden_size"
     )
 
     # Set up hooks to capture attention contributions
@@ -222,23 +222,92 @@ def main():
 
     def capture_attn_contribution_hook():
         def hook_fn(module, input, output):
-            attn_out = input[0].detach()[0, :, :]  # [seq_len, hidden_size]
-            attn_out = attn_out.reshape(
-                attn_out.size(0), num_heads, head_dim
-            )  # [seq_len, num_heads, head_dim]
+            # Debug: print tensor shapes to understand the actual input format
+            # Get the input tensor to o_proj (this should be the attention output)
+            if len(input) > 0:
+                attn_input = input[0].detach()  # This is the input to o_proj
 
-            # Get o_proj weights and reshape
-            o_proj = module.weight.detach().clone()
-            o_proj = (
-                o_proj.reshape(hidden_size, num_heads, head_dim)
-                .permute(1, 2, 0)
-                .contiguous()
-            )
-            # [num_heads, head_dim, hidden_size]
+                # Debug logging for first few calls
+                if len(attn_contribution) < 3:  # Only log for first few layers
+                    logger.info(f"Debug - o_proj input shape: {attn_input.shape}")
+                    logger.info(f"Debug - o_proj weight shape: {module.weight.shape}")
+                    # Calculate what the input dimension should be
+                    expected_input_dim = module.weight.shape[
+                        1
+                    ]  # input features to o_proj
+                    logger.info(
+                        f"Debug - o_proj expected input dim: {expected_input_dim}"
+                    )
 
-            # Calculate per-head contribution: [seq_len, num_heads, hidden_size]
-            contribution = torch.einsum("snk,nkh->snh", attn_out, o_proj)
-            attn_contribution.append(contribution)
+                # Use the actual input dimension from the o_proj layer
+                o_proj_input_dim = module.weight.shape[1]
+
+                # Handle different possible input shapes
+                if len(attn_input.shape) == 3:  # [batch_size, seq_len, input_dim]
+                    batch_size, seq_len, actual_input_dim = attn_input.shape
+                    if batch_size == 1:  # Single batch
+                        attn_out = attn_input[0, :, :]  # [seq_len, input_dim]
+                    else:
+                        logger.warning(
+                            f"Unexpected batch size: {batch_size}, using first batch"
+                        )
+                        attn_out = attn_input[0, :, :]  # [seq_len, input_dim]
+                elif len(attn_input.shape) == 2:  # [seq_len, input_dim]
+                    attn_out = attn_input
+                    actual_input_dim = attn_input.shape[-1]
+                else:
+                    logger.error(f"Unexpected input shape: {attn_input.shape}")
+                    return
+
+                # Verify the input dimension matches what o_proj expects
+                if actual_input_dim != o_proj_input_dim:
+                    logger.error(
+                        f"Input dim mismatch: o_proj expects {o_proj_input_dim}, got {actual_input_dim}"
+                    )
+                    return
+
+                # The input dimension should be num_heads * head_dim
+                if actual_input_dim != num_heads * head_dim:
+                    logger.warning(
+                        f"Input dim {actual_input_dim} != num_heads * head_dim ({num_heads * head_dim})"
+                    )
+                    # Adjust our understanding - use the actual input dimension
+                    effective_head_dim = actual_input_dim // num_heads
+                    logger.info(f"Using effective head_dim: {effective_head_dim}")
+                else:
+                    effective_head_dim = head_dim
+
+                # Now reshape to separate heads using the effective head dimension
+                seq_len = attn_out.shape[0]
+                try:
+                    attn_out = attn_out.reshape(
+                        seq_len, num_heads, effective_head_dim
+                    )  # [seq_len, num_heads, effective_head_dim]
+                except RuntimeError as e:
+                    logger.error(f"Reshape failed: {e}")
+                    logger.error(
+                        f"Tensor shape: {attn_out.shape}, trying to reshape to [{seq_len}, {num_heads}, {effective_head_dim}]"
+                    )
+                    logger.error(
+                        f"Expected total elements: {seq_len * num_heads * effective_head_dim}, actual: {attn_out.numel()}"
+                    )
+                    return
+
+                # Get o_proj weights and reshape
+                o_proj = module.weight.detach().clone()
+                # o_proj shape should be [hidden_size, num_heads * effective_head_dim]
+                o_proj = (
+                    o_proj.reshape(hidden_size, num_heads, effective_head_dim)
+                    .permute(1, 2, 0)
+                    .contiguous()
+                )
+                # [num_heads, effective_head_dim, hidden_size]
+
+                # Calculate per-head contribution: [seq_len, num_heads, hidden_size]
+                contribution = torch.einsum("snk,nkh->snh", attn_out, o_proj)
+                attn_contribution.append(contribution)
+            else:
+                logger.error("No input found in hook")
 
         return hook_fn
 
@@ -291,12 +360,45 @@ def main():
                 thinking_contributions, dim=0
             )  # [num_layers, num_heads, hidden_size]
 
+            # Debug: check thinking direction shape
+            if i == 0:  # Only log for first example
+                logger.info(
+                    f"Debug - thinking_length_direction shape: {thinking_length_direction.shape}"
+                )
+                logger.info(
+                    f"Debug - all_head_contributions shape: {all_head_contributions.shape}"
+                )
+
             # Calculate dot product with negative thinking direction (since we want short thinking)
-            dot_products = torch.einsum(
-                "ijl,il->ij",
-                all_head_contributions.float(),
-                -thinking_length_direction[:, 0].float(),
-            )
+            # Handle different shapes of thinking_length_direction
+            if len(thinking_length_direction.shape) == 2:
+                # Shape: [num_layers, hidden_size] or [num_layers, 1]
+                if thinking_length_direction.shape[1] == 1:
+                    # Case: [num_layers, 1] - squeeze to [num_layers]
+                    direction = -thinking_length_direction[:, 0].float()
+                    dot_products = torch.einsum(
+                        "ijl,il->ij",
+                        all_head_contributions.float(),
+                        direction.unsqueeze(1),
+                    )
+                else:
+                    # Case: [num_layers, hidden_size]
+                    direction = -thinking_length_direction.float()
+                    dot_products = torch.einsum(
+                        "ijl,il->ij", all_head_contributions.float(), direction
+                    )
+            elif len(thinking_length_direction.shape) == 1:
+                # Shape: [hidden_size] - broadcast to all layers
+                direction = -thinking_length_direction.float()
+                dot_products = torch.einsum(
+                    "ijl,l->ij", all_head_contributions.float(), direction
+                )
+            else:
+                logger.error(
+                    f"Unexpected thinking_length_direction shape: {thinking_length_direction.shape}"
+                )
+                continue
+
             avg_contribution += dot_products.cpu().numpy()
 
         # Clear for next iteration
