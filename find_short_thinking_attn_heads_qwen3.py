@@ -8,6 +8,8 @@ by analyzing their contributions to the short reasoning direction.
 Usage:
     python find_short_thinking_attn_heads_qwen3.py --model Qwen/Qwen3-0.6B
     python find_short_thinking_attn_heads_qwen3.py --model Qwen/Qwen3-0.6B --responses_file custom_responses.json
+    python find_short_thinking_attn_heads_qwen3.py --model Qwen/Qwen3-0.6B --directions_file custom_directions.pt
+    python find_short_thinking_attn_heads_qwen3.py --model Qwen/Qwen3-0.6B --responses_file custom_responses.json --directions_file custom_directions.pt
 """
 
 import gc
@@ -44,6 +46,12 @@ def parse_args():
         type=str,
         default=None,
         help="Path to responses JSON file (auto-detected from model name if not provided)",
+    )
+    parser.add_argument(
+        "--directions_file",
+        type=str,
+        default=None,
+        help="Path to thinking length directions file (auto-detected from model name if not provided)",
     )
     parser.add_argument(
         "--layer_start", type=int, default=0, help="Start layer for visualization"
@@ -175,15 +183,25 @@ def main():
         )
 
     # Load thinking length direction
-    direction_file = f"directions/{model_name}_thinking_length_direction_gsm8k_attn.pt"
-    if not os.path.exists(direction_file):
-        logger.error(f"Direction file not found: {direction_file}")
-        logger.info(
-            "Please run extract_reasoning_length_direction_improved.py first to extract directions"
-        )
-        return
+    direction_file = (
+        args.directions_file
+        or f"directions/{model_name}_thinking_length_direction_gsm8k_attn.pt"
+    )
 
     logger.info(f"Loading thinking length direction from {direction_file}")
+    if not os.path.exists(direction_file):
+        logger.error(f"Direction file not found: {direction_file}")
+        if args.directions_file:
+            logger.info(
+                "Please check that the specified directions file path is correct"
+            )
+        else:
+            logger.info(
+                "Please run extract_reasoning_length_direction_improved.py first to extract directions, "
+                "or specify a custom directions file with --directions_file"
+            )
+        return
+
     thinking_length_direction = torch.load(direction_file).to(device)
     thinking_length_direction = thinking_length_direction / torch.norm(
         thinking_length_direction, dim=-1, keepdim=True

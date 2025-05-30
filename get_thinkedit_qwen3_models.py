@@ -7,6 +7,7 @@ to mitigate overly short reasoning in Qwen3 models.
 
 Usage:
     python get_thinkedit_qwen3_models.py --model Qwen/Qwen3-0.6B
+    python get_thinkedit_qwen3_models.py --model Qwen/Qwen3-0.6B --directions_file custom_directions.pt
 
 Prerequisites:
     1. Run find_short_thinking_attn_heads_qwen3.py to identify target heads
@@ -38,6 +39,12 @@ def parse_args():
         type=str,
         default="thinkedit_analysis",
         help="Directory containing head analysis results",
+    )
+    parser.add_argument(
+        "--directions_file",
+        type=str,
+        default=None,
+        help="Path to thinking length directions file (auto-detected from model name if not provided)",
     )
     parser.add_argument(
         "--output_dir",
@@ -194,13 +201,25 @@ def main():
     logger.info(f"Heads to edit: {heads_to_edit}")
 
     # Load thinking length direction
-    direction_file = f"directions/{model_name}_thinking_length_direction_gsm8k_attn.pt"
-    if not os.path.exists(direction_file):
-        logger.error(f"Direction file not found: {direction_file}")
-        logger.info("Please run extract_reasoning_length_direction_improved.py first")
-        return
+    direction_file = (
+        args.directions_file
+        or f"directions/{model_name}_thinking_length_direction_gsm8k_attn.pt"
+    )
 
     logger.info(f"Loading thinking length direction from {direction_file}")
+    if not os.path.exists(direction_file):
+        logger.error(f"Direction file not found: {direction_file}")
+        if args.directions_file:
+            logger.info(
+                "Please check that the specified directions file path is correct"
+            )
+        else:
+            logger.info(
+                "Please run extract_reasoning_length_direction_improved.py first, "
+                "or specify a custom directions file with --directions_file"
+            )
+        return
+
     thinking_length_direction = torch.load(direction_file).to(device)
     thinking_length_direction = thinking_length_direction / torch.norm(
         thinking_length_direction, dim=-1, keepdim=True
