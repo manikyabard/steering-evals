@@ -88,29 +88,42 @@ def get_model_size_info(model_name_or_path):
     model_str = str(model_name_or_path).lower()
 
     # Determine model size and set appropriate defaults following ThinkEdit methodology
-    if "0.6b" in model_str or "0.5b" in model_str:
-        size_category = "small"
-        default_k = 10
-        default_threshold = 100
+    # Check larger sizes first to avoid substring matching issues
+    if "70b" in model_str or "72b" in model_str:
+        size_category = "xxxlarge"
+        default_k = 60
+        default_threshold = 500
+    elif "32b" in model_str or "30b" in model_str:
+        size_category = "xxlarge"
+        default_k = 50
+        default_threshold = 400
+    elif "14b" in model_str or "13b" in model_str:
+        size_category = "xlarge"
+        default_k = 40
+        default_threshold = 300
+    elif "7b" in model_str or "8b" in model_str:
+        size_category = "large"
+        default_k = 30
+        default_threshold = 250
+    elif "4b" in model_str:
+        size_category = "medium"
+        default_k = 20
+        default_threshold = 200
+    elif "3b" in model_str:
+        size_category = "medium"
+        default_k = 15
+        default_threshold = 150
     elif "1.5b" in model_str or "1b" in model_str:
         size_category = "small"
         default_k = 10
         default_threshold = 100
-    elif "4b" in model_str or "3b" in model_str:
-        size_category = "medium"
-        default_k = 20
-        default_threshold = 200
-    elif "7b" in model_str or "8b" in model_str:
-        size_category = "medium"
-        default_k = 20
-        default_threshold = 200
-    elif "14b" in model_str or "13b" in model_str:
-        size_category = "large"
-        default_k = 40
-        default_threshold = 300
+    elif "0.6b" in model_str or "0.5b" in model_str:
+        size_category = "small"
+        default_k = 10
+        default_threshold = 100
     else:
-        # Default for unknown sizes
-        size_category = "medium"
+        # Default for unknown sizes - be conservative
+        size_category = "unknown"
         default_k = 20
         default_threshold = 200
 
@@ -279,16 +292,48 @@ def main():
     num_layers = model.config.num_hidden_layers
     hidden_size = model.config.hidden_size
     num_heads = model.config.num_attention_heads
-    head_dim = model.config.hidden_size // num_heads
+    # Use actual head_dim from config, not calculated from hidden_size
+    head_dim = getattr(model.config, "head_dim", model.config.hidden_size // num_heads)
 
+    # Calculate actual attention dimension (may differ from hidden_size)
+    actual_attn_dim = num_heads * head_dim
+
+    logger.info(f"Model architecture analysis:")
+    logger.info(f"  Layers: {num_layers}")
+    logger.info(f"  Hidden size: {hidden_size}")
+    logger.info(f"  Attention heads: {num_heads}")
     logger.info(
-        f"Model config: {num_layers} layers, {num_heads} heads, {head_dim} head_dim, {hidden_size} hidden_size"
+        f"  Head dimension: {head_dim} ({'from config' if hasattr(model.config, 'head_dim') else 'calculated'})"
     )
+    logger.info(f"  Total attention dimension: {actual_attn_dim}")
+    logger.info(f"  Size category: {model_size_info['size_category']}")
 
     # Debug: Check actual o_proj dimensions
     sample_layer = model.model.layers[0].self_attn.o_proj
-    logger.info(f"Sample o_proj weight shape: {sample_layer.weight.shape}")
-    logger.info(f"Expected: [{hidden_size}, {hidden_size}] or [{hidden_size}, ?]")
+    o_proj_shape = sample_layer.weight.shape
+    logger.info(f"  Sample o_proj weight shape: {o_proj_shape}")
+
+    # Validate architecture expectations
+    expected_o_proj = (hidden_size, actual_attn_dim)
+    if o_proj_shape == expected_o_proj:
+        logger.info(f"  ✓ o_proj shape matches expected {expected_o_proj}")
+    else:
+        logger.warning(
+            f"  ⚠ o_proj shape {o_proj_shape} differs from expected {expected_o_proj}"
+        )
+        logger.info(f"  → Will attempt adaptive processing")
+
+    # Check for potential issues
+    if actual_attn_dim == hidden_size:
+        logger.info(f"  → Standard architecture: attention_dim == hidden_size")
+    elif actual_attn_dim > hidden_size:
+        logger.info(
+            f"  → Compressed architecture: attention_dim ({actual_attn_dim}) > hidden_size ({hidden_size})"
+        )
+    else:
+        logger.info(
+            f"  → Expanded architecture: attention_dim ({actual_attn_dim}) < hidden_size ({hidden_size})"
+        )
 
     # Validate model architecture compatibility
     def validate_architecture():
@@ -319,29 +364,29 @@ def main():
                     f"Architecture validation: attention output shape = {test_shape}"
                 )
 
-                if test_shape[-1] == hidden_size:
+                if test_shape[-1] == actual_attn_dim:
                     logger.info(
                         "✓ Standard architecture detected - using direct processing"
                     )
                     return "standard"
-                elif test_shape[-1] > hidden_size:
+                elif test_shape[-1] == hidden_size:
                     logger.info(
-                        f"✓ Extended architecture detected - using fallback processing"
+                        f"✓ Legacy architecture detected - using legacy processing"
+                    )
+                    return "legacy"
+                elif test_shape[-1] > actual_attn_dim:
+                    logger.info(
+                        f"✓ Extended architecture detected - using salvage processing"
                     )
                     logger.info(
-                        f"  Will use first {hidden_size} of {test_shape[-1]} dimensions"
+                        f"  Will use first {actual_attn_dim} of {test_shape[-1]} dimensions"
                     )
                     return "extended"
                 else:
                     logger.warning(
-                        f"⚠ Unexpected architecture: attention dim {test_shape[-1]} < hidden_size {hidden_size}"
+                        f"⚠ Unexpected architecture: attention dim {test_shape[-1]} < expected {actual_attn_dim}"
                     )
                     return "unexpected"
-            else:
-                logger.warning(
-                    "⚠ No attention contributions captured during validation"
-                )
-                return "unknown"
 
         except Exception as e:
             logger.warning(f"Architecture validation failed: {e}")
@@ -357,53 +402,67 @@ def main():
 
     def capture_attn_contribution_hook():
         def hook_fn(module, input, output):
-            # Qwen3 attention: input to o_proj has shape [batch, seq_len, ?]
-            # Let's check the actual attention output before o_proj
-            attn_out = input[0].detach()[0, :, :]  # [seq_len, ?]
+            # Qwen3 attention: input to o_proj has shape [batch, seq_len, actual_attn_dim]
+            attn_out = input[0].detach()[0, :, :]  # [seq_len, actual_attn_dim]
 
-            # Check if this is the correct shape for attention heads
-            if attn_out.size(-1) == hidden_size:
-                # Standard case: reshape to [seq_len, num_heads, head_dim]
+            # Check if this matches our expected attention dimension
+            if attn_out.size(-1) == actual_attn_dim:
+                # Expected case: reshape using actual head dimensions
                 attn_out = attn_out.reshape(attn_out.size(0), num_heads, head_dim)
 
-                # Get o_proj weight and reshape it
-                o_proj = module.weight.detach().clone()  # [hidden_size, hidden_size]
+                # Get o_proj weight: should be [hidden_size, actual_attn_dim]
+                o_proj = (
+                    module.weight.detach().clone()
+                )  # [hidden_size, actual_attn_dim]
+
+                # Reshape o_proj to work with individual heads
+                # o_proj maps from [num_heads, head_dim] -> [hidden_size]
                 o_proj = (
                     o_proj.reshape(hidden_size, num_heads, head_dim)
+                    .permute(1, 2, 0)
+                    .contiguous()  # [num_heads, head_dim, hidden_size]
+                )
+
+                # Calculate contribution: [seq_len, num_heads, head_dim] @ [num_heads, head_dim, hidden_size]
+                # -> [seq_len, num_heads, hidden_size]
+                attn_contribution.append(torch.einsum("snk,nkh->snh", attn_out, o_proj))
+                processing_stats["standard_processing"] += 1
+
+            elif attn_out.size(-1) == hidden_size:
+                # Legacy case: some models might have attn_out = hidden_size
+                # Use calculated head_dim = hidden_size // num_heads
+                legacy_head_dim = hidden_size // num_heads
+                attn_out = attn_out.reshape(
+                    attn_out.size(0), num_heads, legacy_head_dim
+                )
+
+                # o_proj should be square matrix
+                o_proj = module.weight.detach().clone()  # [hidden_size, hidden_size]
+                o_proj = (
+                    o_proj.reshape(hidden_size, num_heads, legacy_head_dim)
                     .permute(1, 2, 0)
                     .contiguous()
                 )
                 attn_contribution.append(torch.einsum("snk,nkh->snh", attn_out, o_proj))
-                processing_stats["standard_processing"] += 1
+                processing_stats["fallback_processing"] += 1
+
             else:
-                # Handle different architectures - expected for Qwen3-4B
+                # Unexpected case
                 actual_dim = attn_out.size(-1)
+                logger.warning(
+                    f"Unexpected attention output shape: {attn_out.shape}, expected [..., {actual_attn_dim}] or [..., {hidden_size}]"
+                )
 
-                # Only log warning for unexpected cases, not the known Qwen3-4B case
-                if (
-                    architecture_type == "extended"
-                    and actual_dim == 4096
-                    and hidden_size == 2560
-                ):
-                    # This is the expected case for Qwen3-4B - no warning needed
-                    pass
-                else:
-                    logger.warning(
-                        f"Unexpected attention output shape: {attn_out.shape}, expected [..., {hidden_size}]"
-                    )
-
-                # For Qwen3-4B, we expect the attention part to be in the first hidden_size dimensions
-                if actual_dim > hidden_size:
-                    # Take first hidden_size dimensions (assuming it's [attn_out, other])
-                    attn_out = attn_out[:, :hidden_size]
+                # Try to salvage by using whatever dimensions we have
+                if actual_dim >= actual_attn_dim:
+                    # Take the expected number of dimensions
+                    attn_out = attn_out[:, :actual_attn_dim]
                     attn_out = attn_out.reshape(attn_out.size(0), num_heads, head_dim)
 
-                    # Get o_proj weight - it should match the full attention output dimension
-                    o_proj = module.weight.detach().clone()  # [hidden_size, actual_dim]
-
-                    # Take only the part that corresponds to the attention output
-                    if o_proj.size(1) >= hidden_size:
-                        o_proj = o_proj[:, :hidden_size]  # [hidden_size, hidden_size]
+                    # Get corresponding part of o_proj
+                    o_proj = module.weight.detach().clone()
+                    if o_proj.size(1) >= actual_attn_dim:
+                        o_proj = o_proj[:, :actual_attn_dim]
 
                     o_proj = (
                         o_proj.reshape(hidden_size, num_heads, head_dim)
@@ -415,11 +474,10 @@ def main():
                     )
                     processing_stats["fallback_processing"] += 1
                 else:
-                    # If actual_dim < hidden_size, something is wrong - skip this layer
+                    # Can't salvage - use zero tensor
                     logger.error(
-                        f"Attention output dimension {actual_dim} is smaller than expected {hidden_size}"
+                        f"Cannot process attention dimension {actual_dim}, too small"
                     )
-                    # Add a zero tensor to maintain layer count
                     zero_contrib = torch.zeros(
                         attn_out.size(0), num_heads, hidden_size, device=attn_out.device
                     )
@@ -515,10 +573,32 @@ def main():
     total_hooks_called = sum(processing_stats.values())
     logger.info(f"Hook processing statistics:")
     logger.info(f"  Total hook calls: {total_hooks_called}")
-    logger.info(f"  Standard processing: {processing_stats['standard_processing']}")
-    logger.info(f"  Fallback processing: {processing_stats['fallback_processing']}")
+    logger.info(
+        f"  Standard processing (attn_dim={actual_attn_dim}): {processing_stats['standard_processing']}"
+    )
+    logger.info(
+        f"  Legacy processing (attn_dim={hidden_size}): {processing_stats['fallback_processing']}"
+    )
     logger.info(f"  Errors: {processing_stats['errors']}")
     logger.info(f"  Expected total: {len(short_thinking_examples) * num_layers}")
+
+    # Validate processing worked correctly
+    if total_hooks_called != len(short_thinking_examples) * num_layers:
+        logger.warning(
+            f"Hook call count mismatch! Expected {len(short_thinking_examples) * num_layers}, got {total_hooks_called}"
+        )
+
+    if processing_stats["errors"] > 0:
+        error_rate = processing_stats["errors"] / total_hooks_called * 100
+        logger.warning(f"Error rate: {error_rate:.1f}% - results may be incomplete")
+
+    # Architecture compatibility summary
+    if processing_stats["standard_processing"] > 0:
+        logger.info(f"  → Architecture: Standard (attention_dim={actual_attn_dim})")
+    elif processing_stats["fallback_processing"] > 0:
+        logger.info(f"  → Architecture: Legacy fallback (attention_dim={hidden_size})")
+    else:
+        logger.warning(f"  → Architecture: Unknown or problematic")
 
     # Determine layer range for visualization
     layer_start = max(0, args.layer_start)
@@ -541,6 +621,7 @@ def main():
     # Save results
     results = {
         "model": args.model,
+        "model_size_category": model_size_info["size_category"],
         "short_thinking_threshold": args.short_thinking_threshold,
         "num_short_examples": len(short_thinking_examples),
         "avg_contribution_matrix": avg_contribution.tolist(),
@@ -552,8 +633,24 @@ def main():
             "num_heads": num_heads,
             "head_dim": head_dim,
             "hidden_size": hidden_size,
+            "actual_attn_dim": actual_attn_dim,
+            "head_dim_source": (
+                "config" if hasattr(model.config, "head_dim") else "calculated"
+            ),
+            "architecture_type": (
+                "standard"
+                if actual_attn_dim == hidden_size
+                else "compressed" if actual_attn_dim > hidden_size else "expanded"
+            ),
+            "o_proj_shape": list(sample_layer.weight.shape),
         },
         "processing_stats": processing_stats,
+        "architecture_validation": {
+            "expected_o_proj_shape": list(expected_o_proj),
+            "actual_o_proj_shape": list(o_proj_shape),
+            "shapes_match": o_proj_shape == expected_o_proj,
+            "architecture_detected": architecture_type,
+        },
     }
 
     results_file = os.path.join(
