@@ -71,8 +71,8 @@ def parse_args():
     parser.add_argument(
         "--top_k_heads",
         type=int,
-        default=10,
-        help="Number of top contributing heads to identify",
+        default=None,
+        help="Number of top contributing heads to identify (auto-detected from model size if not provided)",
     )
     parser.add_argument(
         "--output_dir",
@@ -81,6 +81,44 @@ def parse_args():
         help="Directory to save analysis results",
     )
     return parser.parse_args()
+
+
+def get_model_size_info(model_name_or_path):
+    """Extract model size information and set appropriate defaults."""
+    model_str = str(model_name_or_path).lower()
+
+    # Determine model size and set appropriate defaults following ThinkEdit methodology
+    if "0.6b" in model_str or "0.5b" in model_str:
+        size_category = "small"
+        default_k = 10
+        default_threshold = 100
+    elif "1.5b" in model_str or "1b" in model_str:
+        size_category = "small"
+        default_k = 10
+        default_threshold = 100
+    elif "4b" in model_str or "3b" in model_str:
+        size_category = "medium"
+        default_k = 20
+        default_threshold = 200
+    elif "7b" in model_str or "8b" in model_str:
+        size_category = "medium"
+        default_k = 20
+        default_threshold = 200
+    elif "14b" in model_str or "13b" in model_str:
+        size_category = "large"
+        default_k = 40
+        default_threshold = 300
+    else:
+        # Default for unknown sizes
+        size_category = "medium"
+        default_k = 20
+        default_threshold = 200
+
+    return {
+        "size_category": size_category,
+        "default_k": default_k,
+        "default_threshold": default_threshold,
+    }
 
 
 def top_k_head(matrix, k=20, reverse=True):
@@ -114,6 +152,26 @@ def main():
 
     # Set up logging
     logger = get_logger()
+
+    # Get model size information and set defaults
+    model_size_info = get_model_size_info(args.model)
+
+    # Set defaults based on model size if not provided
+    if args.top_k_heads is None:
+        args.top_k_heads = model_size_info["default_k"]
+        logger.info(
+            f"Auto-detected model size category: {model_size_info['size_category']}"
+        )
+        logger.info(f"Setting top_k_heads to {args.top_k_heads} based on model size")
+
+    # Suggest threshold if using default and it seems inappropriate for model size
+    if (
+        args.short_thinking_threshold == 100
+        and model_size_info["default_threshold"] != 100
+    ):
+        logger.info(
+            f"Consider using --short_thinking_threshold {model_size_info['default_threshold']} for {model_size_info['size_category']} models"
+        )
 
     # Set up device
     if torch.cuda.is_available():
@@ -227,15 +285,78 @@ def main():
         f"Model config: {num_layers} layers, {num_heads} heads, {head_dim} head_dim, {hidden_size} hidden_size"
     )
 
+    # Debug: Check actual o_proj dimensions
+    sample_layer = model.model.layers[0].self_attn.o_proj
+    logger.info(f"Sample o_proj weight shape: {sample_layer.weight.shape}")
+    logger.info(f"Expected: [{hidden_size}, {hidden_size}] or [{hidden_size}, ?]")
+
+    # Validate model architecture compatibility
+    def validate_architecture():
+        """Quick validation that our hook will work with this model architecture."""
+        try:
+            # Test with a short dummy input
+            dummy_input = tokenizer("Test", return_tensors="pt").to(device)
+
+            test_contributions = []
+
+            def test_hook(module, input, output):
+                attn_out = input[0].detach()[0, :, :]
+                test_contributions.append(attn_out.shape)
+
+            # Register temporary hook on first layer
+            hook = model.model.layers[0].self_attn.o_proj.register_forward_hook(
+                test_hook
+            )
+
+            with torch.no_grad():
+                _ = model(**dummy_input)
+
+            hook.remove()
+
+            if test_contributions:
+                test_shape = test_contributions[0]
+                logger.info(
+                    f"Architecture validation: attention output shape = {test_shape}"
+                )
+
+                if test_shape[-1] == hidden_size:
+                    logger.info(
+                        "✓ Standard architecture detected - using direct processing"
+                    )
+                    return "standard"
+                elif test_shape[-1] > hidden_size:
+                    logger.info(
+                        f"✓ Extended architecture detected - using fallback processing"
+                    )
+                    logger.info(
+                        f"  Will use first {hidden_size} of {test_shape[-1]} dimensions"
+                    )
+                    return "extended"
+                else:
+                    logger.warning(
+                        f"⚠ Unexpected architecture: attention dim {test_shape[-1]} < hidden_size {hidden_size}"
+                    )
+                    return "unexpected"
+            else:
+                logger.warning(
+                    "⚠ No attention contributions captured during validation"
+                )
+                return "unknown"
+
+        except Exception as e:
+            logger.warning(f"Architecture validation failed: {e}")
+            return "unknown"
+
+    architecture_type = validate_architecture()
+
     # Set up hooks exactly like ThinkEdit but adapted for Qwen3 architecture
     attn_contribution = []
 
     def capture_attn_contribution_hook():
         def hook_fn(module, input, output):
-            # Qwen3 attention: input to o_proj has shape [batch, seq_len, hidden_size]
-            # not [batch, seq_len, 2*hidden_size] as I thought earlier
+            # Qwen3 attention: input to o_proj has shape [batch, seq_len, ?]
             # Let's check the actual attention output before o_proj
-            attn_out = input[0].detach()[0, :, :]  # [seq_len, hidden_size]
+            attn_out = input[0].detach()[0, :, :]  # [seq_len, ?]
 
             # Check if this is the correct shape for attention heads
             if attn_out.size(-1) == hidden_size:
@@ -251,21 +372,24 @@ def main():
                 )
                 attn_contribution.append(torch.einsum("snk,nkh->snh", attn_out, o_proj))
             else:
-                # If shape is different, we need to adapt - this is for debugging
+                # Handle different architectures - Qwen3-4B seems to have different dimensions
+                actual_dim = attn_out.size(-1)
                 logger.warning(
                     f"Unexpected attention output shape: {attn_out.shape}, expected [..., {hidden_size}]"
                 )
-                # Try to extract only the attention part if it's concatenated
-                if attn_out.size(-1) == 2 * hidden_size:
-                    # Take first half (assuming it's [attn_out, other])
+
+                # For Qwen3-4B, we expect the attention part to be in the first hidden_size dimensions
+                if actual_dim > hidden_size:
+                    # Take first hidden_size dimensions (assuming it's [attn_out, other])
                     attn_out = attn_out[:, :hidden_size]
                     attn_out = attn_out.reshape(attn_out.size(0), num_heads, head_dim)
 
-                    # o_proj might also be larger
-                    o_proj = module.weight.detach().clone()
-                    if o_proj.size(1) == 2 * hidden_size:
-                        # Take first part of weight matrix
-                        o_proj = o_proj[:, :hidden_size]
+                    # Get o_proj weight - it should match the full attention output dimension
+                    o_proj = module.weight.detach().clone()  # [hidden_size, actual_dim]
+
+                    # Take only the part that corresponds to the attention output
+                    if o_proj.size(1) >= hidden_size:
+                        o_proj = o_proj[:, :hidden_size]  # [hidden_size, hidden_size]
 
                     o_proj = (
                         o_proj.reshape(hidden_size, num_heads, head_dim)
@@ -275,6 +399,16 @@ def main():
                     attn_contribution.append(
                         torch.einsum("snk,nkh->snh", attn_out, o_proj)
                     )
+                else:
+                    # If actual_dim < hidden_size, something is wrong - skip this layer
+                    logger.error(
+                        f"Attention output dimension {actual_dim} is smaller than expected {hidden_size}"
+                    )
+                    # Add a zero tensor to maintain layer count
+                    zero_contrib = torch.zeros(
+                        attn_out.size(0), num_heads, hidden_size, device=attn_out.device
+                    )
+                    attn_contribution.append(zero_contrib)
 
         return hook_fn
 
@@ -307,6 +441,24 @@ def main():
                 input_ids=toks["input_ids"].to(device),
                 attention_mask=toks["attention_mask"].to(device),
             )
+
+            # Check if we got any contributions
+            if not attn_contribution:
+                logger.error(
+                    f"No attention contributions captured for example {i+1}. Skipping."
+                )
+                continue
+
+            if len(attn_contribution) != num_layers:
+                logger.warning(
+                    f"Expected {num_layers} attention contributions, got {len(attn_contribution)}. Padding with zeros."
+                )
+                # Pad with zeros if we're missing layers
+                while len(attn_contribution) < num_layers:
+                    seq_len = toks["input_ids"].size(1)
+                    zero_contrib = torch.zeros(seq_len, num_heads, hidden_size)
+                    attn_contribution.append(zero_contrib)
+
             attn_mean_contributions = [
                 tensor[start - 1 : end - 1, :, :]
                 .mean(dim=0)
