@@ -116,7 +116,12 @@ def main():
     logger = get_logger()
 
     # Set up device
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        device = "cuda:0"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
     logger.info(f"Using device: {device}")
 
     # Create output directory
@@ -222,22 +227,54 @@ def main():
         f"Model config: {num_layers} layers, {num_heads} heads, {head_dim} head_dim, {hidden_size} hidden_size"
     )
 
-    # Set up hooks exactly like ThinkEdit
+    # Set up hooks exactly like ThinkEdit but adapted for Qwen3 architecture
     attn_contribution = []
 
     def capture_attn_contribution_hook():
         def hook_fn(module, input, output):
-            attn_out = input[0].detach()[
-                0, :, :
-            ]  # Exactly like ThinkEdit - assume batch size 1
-            attn_out = attn_out.reshape(attn_out.size(0), num_heads, head_dim)
-            o_proj = module.weight.detach().clone()
-            o_proj = (
-                o_proj.reshape(hidden_size, num_heads, head_dim)
-                .permute(1, 2, 0)
-                .contiguous()
-            )
-            attn_contribution.append(torch.einsum("snk,nkh->snh", attn_out, o_proj))
+            # Qwen3 attention: input to o_proj has shape [batch, seq_len, hidden_size]
+            # not [batch, seq_len, 2*hidden_size] as I thought earlier
+            # Let's check the actual attention output before o_proj
+            attn_out = input[0].detach()[0, :, :]  # [seq_len, hidden_size]
+
+            # Check if this is the correct shape for attention heads
+            if attn_out.size(-1) == hidden_size:
+                # Standard case: reshape to [seq_len, num_heads, head_dim]
+                attn_out = attn_out.reshape(attn_out.size(0), num_heads, head_dim)
+
+                # Get o_proj weight and reshape it
+                o_proj = module.weight.detach().clone()  # [hidden_size, hidden_size]
+                o_proj = (
+                    o_proj.reshape(hidden_size, num_heads, head_dim)
+                    .permute(1, 2, 0)
+                    .contiguous()
+                )
+                attn_contribution.append(torch.einsum("snk,nkh->snh", attn_out, o_proj))
+            else:
+                # If shape is different, we need to adapt - this is for debugging
+                logger.warning(
+                    f"Unexpected attention output shape: {attn_out.shape}, expected [..., {hidden_size}]"
+                )
+                # Try to extract only the attention part if it's concatenated
+                if attn_out.size(-1) == 2 * hidden_size:
+                    # Take first half (assuming it's [attn_out, other])
+                    attn_out = attn_out[:, :hidden_size]
+                    attn_out = attn_out.reshape(attn_out.size(0), num_heads, head_dim)
+
+                    # o_proj might also be larger
+                    o_proj = module.weight.detach().clone()
+                    if o_proj.size(1) == 2 * hidden_size:
+                        # Take first part of weight matrix
+                        o_proj = o_proj[:, :hidden_size]
+
+                    o_proj = (
+                        o_proj.reshape(hidden_size, num_heads, head_dim)
+                        .permute(1, 2, 0)
+                        .contiguous()
+                    )
+                    attn_contribution.append(
+                        torch.einsum("snk,nkh->snh", attn_out, o_proj)
+                    )
 
         return hook_fn
 
@@ -278,9 +315,10 @@ def main():
             ]
             all_head_contributions = torch.stack(attn_mean_contributions, dim=0)
 
-            # Copy ThinkEdit's exact operation - trust the researchers completely
+            # Fix ThinkEdit's einsum - they have a dimensional error
+            # thinking_length_direction[:, 0] has shape [num_layers] so we need 'ijl,i->ij'
             dot_products = torch.einsum(
-                "ijl,il->ij",
+                "ijl,i->ij",
                 all_head_contributions.float(),
                 -thinking_length_direction[:, 0].cpu().float(),
             )
@@ -291,7 +329,10 @@ def main():
 
         # More aggressive memory cleanup for large models
         if i % 5 == 0:  # More frequent cleanup
-            torch.cuda.empty_cache()
+            if device.startswith("cuda"):
+                torch.cuda.empty_cache()
+            elif device == "mps":
+                torch.mps.empty_cache()
             gc.collect()
 
     # Normalize contributions
