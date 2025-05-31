@@ -352,6 +352,9 @@ def main():
     # Set up hooks exactly like ThinkEdit but adapted for Qwen3 architecture
     attn_contribution = []
 
+    # Track processing statistics
+    processing_stats = {"standard_processing": 0, "fallback_processing": 0, "errors": 0}
+
     def capture_attn_contribution_hook():
         def hook_fn(module, input, output):
             # Qwen3 attention: input to o_proj has shape [batch, seq_len, ?]
@@ -371,12 +374,23 @@ def main():
                     .contiguous()
                 )
                 attn_contribution.append(torch.einsum("snk,nkh->snh", attn_out, o_proj))
+                processing_stats["standard_processing"] += 1
             else:
-                # Handle different architectures - Qwen3-4B seems to have different dimensions
+                # Handle different architectures - expected for Qwen3-4B
                 actual_dim = attn_out.size(-1)
-                logger.warning(
-                    f"Unexpected attention output shape: {attn_out.shape}, expected [..., {hidden_size}]"
-                )
+
+                # Only log warning for unexpected cases, not the known Qwen3-4B case
+                if (
+                    architecture_type == "extended"
+                    and actual_dim == 4096
+                    and hidden_size == 2560
+                ):
+                    # This is the expected case for Qwen3-4B - no warning needed
+                    pass
+                else:
+                    logger.warning(
+                        f"Unexpected attention output shape: {attn_out.shape}, expected [..., {hidden_size}]"
+                    )
 
                 # For Qwen3-4B, we expect the attention part to be in the first hidden_size dimensions
                 if actual_dim > hidden_size:
@@ -399,6 +413,7 @@ def main():
                     attn_contribution.append(
                         torch.einsum("snk,nkh->snh", attn_out, o_proj)
                     )
+                    processing_stats["fallback_processing"] += 1
                 else:
                     # If actual_dim < hidden_size, something is wrong - skip this layer
                     logger.error(
@@ -409,6 +424,7 @@ def main():
                         attn_out.size(0), num_heads, hidden_size, device=attn_out.device
                     )
                     attn_contribution.append(zero_contrib)
+                    processing_stats["errors"] += 1
 
         return hook_fn
 
@@ -421,8 +437,13 @@ def main():
     avg_contribution = np.zeros((num_layers, num_heads))
 
     for i, example in enumerate(short_thinking_examples):
-        if i % 10 == 0:
+        if i % 5 == 0:  # More frequent updates
             logger.info(f"Processing example {i+1}/{len(short_thinking_examples)}")
+            if i > 0:  # Show stats after first few examples
+                total_processed = sum(processing_stats.values())
+                logger.info(
+                    f"  Hook stats so far: {processing_stats['fallback_processing']} fallback, {processing_stats['standard_processing']} standard, {processing_stats['errors']} errors"
+                )
 
         # Follow ThinkEdit format exactly
         toks = tokenizer(f"<|User|>{example['question']}<|Assistant|>").input_ids
@@ -490,6 +511,15 @@ def main():
     # Normalize contributions
     avg_contribution = np.asarray(avg_contribution) / len(short_thinking_examples)
 
+    # Log processing statistics
+    total_hooks_called = sum(processing_stats.values())
+    logger.info(f"Hook processing statistics:")
+    logger.info(f"  Total hook calls: {total_hooks_called}")
+    logger.info(f"  Standard processing: {processing_stats['standard_processing']}")
+    logger.info(f"  Fallback processing: {processing_stats['fallback_processing']}")
+    logger.info(f"  Errors: {processing_stats['errors']}")
+    logger.info(f"  Expected total: {len(short_thinking_examples) * num_layers}")
+
     # Determine layer range for visualization
     layer_start = max(0, args.layer_start)
     layer_end = num_layers if args.layer_end == -1 else min(num_layers, args.layer_end)
@@ -523,6 +553,7 @@ def main():
             "head_dim": head_dim,
             "hidden_size": hidden_size,
         },
+        "processing_stats": processing_stats,
     }
 
     results_file = os.path.join(
