@@ -129,6 +129,17 @@ def parse_args():
         default=1000,
         help="Fixed threshold for long thinking examples (> X tokens, default: 1000)",
     )
+    parser.add_argument(
+        "--memory_cleanup_frequency",
+        type=int,
+        default=5,
+        help="How often to clear CUDA cache during processing (default: every 5 examples)",
+    )
+    parser.add_argument(
+        "--use_gradient_checkpointing",
+        action="store_true",
+        help="Enable gradient checkpointing to save memory (slower but uses less memory)",
+    )
     return parser.parse_args()
 
 
@@ -149,7 +160,9 @@ test_args = type('Args', (), {
     'short_percentile': 20.0,
     'long_percentile': 20.0,
     'short_threshold': 100,
-    'long_threshold': 1000
+    'long_threshold': 1000,
+    'memory_cleanup_frequency': 5,
+    'use_gradient_checkpointing': False
 })()
 
 # Use test_args instead of parse_args() when running interactively
@@ -502,7 +515,7 @@ class ImprovedActivationExtractor:
 
 # %% Activation processing functions
 def get_activations_for_example(model, tokenizer, extractor, question, thinking):
-    """Get activations for a single example - matching ThinkEdit approach exactly."""
+    """Get activations for a single example - improved with memory management."""
 
     if extractor.component == "attn":
         prompt_start = f"{question}<｜Assistant｜>"
@@ -513,20 +526,36 @@ def get_activations_for_example(model, tokenizer, extractor, question, thinking)
         toks_full = tokenizer(prompt_full).input_ids
         end = len(toks_full)
 
+        # Clear any existing activations first
+        extractor.clear_activations()
+
+        # Force garbage collection before processing
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
         toks = tokenizer(prompt_full, return_tensors="pt")
         toks = {k: v.to(model.device) for k, v in toks.items()}
 
-        extractor.clear_activations()
+        try:
+            with torch.no_grad():
+                _ = model(**toks)
 
-        with torch.no_grad():
-            _ = model(**toks)
+            stacked_activations = torch.stack(extractor.activations, dim=0)[
+                :, :, start - 1 : end - 1, :
+            ]
+            mean_activations = stacked_activations.mean(dim=2).cpu()
 
-        stacked_activations = torch.stack(extractor.activations, dim=0)[
-            :, :, start - 1 : end - 1, :
-        ]
-        mean_activations = stacked_activations.mean(dim=2).cpu()
+            # Clear activations immediately after processing
+            extractor.clear_activations()
+            del stacked_activations
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-        return mean_activations.squeeze(1)
+            return mean_activations.squeeze(1)
+
+        except torch.cuda.OutOfMemoryError:
+            # Clear everything and re-raise
+            extractor.clear_activations()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            raise
 
     elif extractor.component == "mlp":
         prompt_start = f"{question}<｜Assistant｜>"
@@ -537,19 +566,32 @@ def get_activations_for_example(model, tokenizer, extractor, question, thinking)
         toks_full = tokenizer(prompt_full).input_ids
         end = len(toks_full)
 
+        # Force garbage collection before processing
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
         toks = tokenizer(prompt_full, return_tensors="pt")
         toks = {k: v.to(model.device) for k, v in toks.items()}
 
-        with torch.no_grad():
-            outputs = model(**toks, output_hidden_states=True)
-            residual_outputs = outputs.hidden_states[1:]
+        try:
+            with torch.no_grad():
+                outputs = model(**toks, output_hidden_states=True)
+                residual_outputs = outputs.hidden_states[1:]
 
-        stacked_activations = torch.stack(residual_outputs, dim=0)[
-            :, :, start - 1 : end - 1, :
-        ]
-        mean_activations = stacked_activations.mean(dim=2).cpu()
+            stacked_activations = torch.stack(residual_outputs, dim=0)[
+                :, :, start - 1 : end - 1, :
+            ]
+            mean_activations = stacked_activations.mean(dim=2).cpu()
 
-        return mean_activations.squeeze(1)
+            # Clear intermediate results
+            del outputs, residual_outputs, stacked_activations
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+            return mean_activations.squeeze(1)
+
+        except torch.cuda.OutOfMemoryError:
+            # Clear everything and re-raise
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            raise
 
     else:
         raise ValueError(f"Unsupported component: {extractor.component}")
@@ -601,12 +643,24 @@ def test_single_activation_extraction():
 
 # %% Direction extraction functions
 def extract_directions(
-    model, tokenizer, short_examples, long_examples, component="attn"
+    model,
+    tokenizer,
+    short_examples,
+    long_examples,
+    component="attn",
+    memory_cleanup_frequency=5,
+    use_gradient_checkpointing=False,
 ):
-    """Extract direction vectors by contrasting short vs long thinking examples - ThinkEdit style."""
+    """Extract direction vectors by contrasting short vs long thinking examples - improved memory management."""
 
     logger = get_logger()
     logger.info(f"Extracting directions for {component} component...")
+    logger.info(f"Memory settings: cleanup_freq={memory_cleanup_frequency}")
+
+    # Enable gradient checkpointing if requested
+    if use_gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
+        logger.info("Enabling gradient checkpointing for memory efficiency")
+        model.gradient_checkpointing_enable()
 
     extractor = ImprovedActivationExtractor(model, component)
 
@@ -629,11 +683,18 @@ def extract_directions(
             )
             short_activations.append(activations)
 
-            if i % 20 == 0:
+            # More frequent memory cleanup
+            if i % memory_cleanup_frequency == 0 and i > 0:
                 torch.cuda.empty_cache()
 
+        except torch.cuda.OutOfMemoryError as e:
+            logger.warning(
+                f"OOM error processing short example {i}, skipping: {str(e)[:100]}..."
+            )
+            torch.cuda.empty_cache()
+            continue
         except Exception as e:
-            print(f"Error processing short example {i}: {e}")
+            logger.warning(f"Error processing short example {i}: {e}")
             continue
 
     logger.info(f"Processing {len(long_examples)} long thinking examples...")
@@ -652,11 +713,18 @@ def extract_directions(
             )
             long_activations.append(activations)
 
-            if i % 20 == 0:
+            # More frequent memory cleanup
+            if i % memory_cleanup_frequency == 0 and i > 0:
                 torch.cuda.empty_cache()
 
+        except torch.cuda.OutOfMemoryError as e:
+            logger.warning(
+                f"OOM error processing long example {i}, skipping: {str(e)[:100]}..."
+            )
+            torch.cuda.empty_cache()
+            continue
         except Exception as e:
-            print(f"Error processing long example {i}: {e}")
+            logger.warning(f"Error processing long example {i}: {e}")
             continue
 
     logger.info("Computing direction vectors...")
@@ -673,6 +741,9 @@ def extract_directions(
     logger.info(
         f"Successfully processed {len(short_activations)} short and {len(long_activations)} long examples"
     )
+
+    # Clear memory before final computation
+    torch.cuda.empty_cache()
 
     short_stack = torch.stack(short_activations, dim=0)
     long_stack = torch.stack(long_activations, dim=0)
@@ -693,6 +764,7 @@ def extract_directions(
 
     extractor.remove_hooks()
     del short_activations, long_activations
+    del short_stack, long_stack, mean_embedding_short, mean_embedding_long
     torch.cuda.empty_cache()
 
     logger.info(
@@ -810,6 +882,11 @@ def main():
     )
     logger.info(f"Device: {args.device}")
 
+    # Log memory management settings
+    logger.info(f"Memory management:")
+    logger.info(f"  Memory cleanup frequency: {args.memory_cleanup_frequency}")
+    logger.info(f"  Gradient checkpointing: {args.use_gradient_checkpointing}")
+
     if args.use_percentiles:
         logger.info(f"Selection method: Percentiles")
         logger.info(f"  Short: bottom {args.short_percentile}%")
@@ -860,7 +937,13 @@ def main():
         logger.info(f"{'='*40}")
 
         directions = extract_directions(
-            model, tokenizer, short_examples, long_examples, comp
+            model,
+            tokenizer,
+            short_examples,
+            long_examples,
+            comp,
+            args.memory_cleanup_frequency,
+            args.use_gradient_checkpointing,
         )
 
         save_directions(
