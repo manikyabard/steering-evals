@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-Find short thinking attention heads for Qwen3 models.
-
-This script identifies attention heads that contribute to overly short reasoning
-by analyzing their contributions to the short reasoning direction.
+Find short thinking attention heads in Qwen3 models.
 
 Usage:
-    python find_short_thinking_attn_heads_qwen3.py --model Qwen/Qwen3-0.6B
-    python find_short_thinking_attn_heads_qwen3.py --model Qwen/Qwen3-0.6B --responses_file custom_responses.json
-    python find_short_thinking_attn_heads_qwen3.py --model Qwen/Qwen3-0.6B --directions_file custom_directions.pt
-    python find_short_thinking_attn_heads_qwen3.py --model Qwen/Qwen3-0.6B --responses_file custom_responses.json --directions_file custom_directions.pt
+    python find_short_thinking_attn_heads_qwen3.py --model Qwen/Qwen3-0.6B --responses-file custom_responses.json
+    python find_short_thinking_attn_heads_qwen3.py --model Qwen/Qwen3-0.6B --directions-file custom_directions.pt
+    python find_short_thinking_attn_heads_qwen3.py --model Qwen/Qwen3-0.6B --responses-file custom_responses.json --directions-file custom_directions.pt
 """
 
 import gc
@@ -35,47 +31,45 @@ torch.cuda.manual_seed_all(42)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Find short thinking attention heads for Qwen3 models"
-    )
+    parser = argparse.ArgumentParser(description="Find short thinking attention heads")
     parser.add_argument(
         "--model", type=str, default="Qwen/Qwen3-0.6B", help="Model name or path"
     )
     parser.add_argument(
-        "--responses_file",
+        "--responses-file",
         type=str,
         default=None,
-        help="Path to responses JSON file (auto-detected from model name if not provided)",
+        help="Path to responses JSON file (auto-detected if not provided)",
     )
     parser.add_argument(
-        "--directions_file",
+        "--directions-file",
         type=str,
         default=None,
-        help="Path to thinking length directions file (auto-detected from model name if not provided)",
+        help="Path to directions file (auto-detected if not provided)",
     )
     parser.add_argument(
-        "--layer_start", type=int, default=0, help="Start layer for visualization"
+        "--layer-start", type=int, default=0, help="Start layer for visualization"
     )
     parser.add_argument(
-        "--layer_end",
-        type=int,
-        default=-1,
-        help="End layer for visualization (-1 for all layers)",
-    )
-    parser.add_argument(
-        "--short_thinking_threshold",
-        type=int,
-        default=100,
-        help="Threshold for considering thinking as 'short' (in tokens)",
-    )
-    parser.add_argument(
-        "--top_k_heads",
+        "--layer-end",
         type=int,
         default=None,
-        help="Number of top contributing heads to identify (auto-detected from model size if not provided)",
+        help="End layer for visualization (default: all layers)",
     )
     parser.add_argument(
-        "--output_dir",
+        "--short-thinking-threshold",
+        type=int,
+        default=None,
+        help="Threshold for short thinking in tokens (auto-determined if not provided)",
+    )
+    parser.add_argument(
+        "--top-k-heads",
+        type=int,
+        default=None,
+        help="Number of top heads to identify (auto-determined based on model size)",
+    )
+    parser.add_argument(
+        "--output-dir",
         type=str,
         default="thinkedit_analysis",
         help="Directory to save analysis results",
@@ -183,7 +177,7 @@ def main():
         and model_size_info["default_threshold"] != 100
     ):
         logger.info(
-            f"Consider using --short_thinking_threshold {model_size_info['default_threshold']} for {model_size_info['size_category']} models"
+            f"Consider using --short-thinking-threshold {model_size_info['default_threshold']} for {model_size_info['size_category']} models"
         )
 
     # Set up device
@@ -216,7 +210,7 @@ def main():
         else:
             logger.info(
                 "Please run generate_responses_gsm8k.py first to generate responses, "
-                "or specify a custom responses file with --responses_file"
+                "or specify a custom responses file with --responses-file"
             )
         return
 
@@ -260,7 +254,7 @@ def main():
 
     if len(short_thinking_examples) < 10:
         logger.warning(
-            f"Very few short thinking examples found. Consider increasing --short_thinking_threshold"
+            f"Very few short thinking examples found. Consider increasing --short-thinking-threshold"
         )
 
     # Load thinking length direction
@@ -279,7 +273,7 @@ def main():
         else:
             logger.info(
                 "Please run extract_reasoning_length_direction_improved.py first to extract directions, "
-                "or specify a custom directions file with --directions_file"
+                "or specify a custom directions file with --directions-file"
             )
         return
 
@@ -602,7 +596,7 @@ def main():
 
     # Determine layer range for visualization
     layer_start = max(0, args.layer_start)
-    layer_end = num_layers if args.layer_end == -1 else min(num_layers, args.layer_end)
+    layer_end = num_layers if args.layer_end is None else min(num_layers, args.layer_end)
 
     # Find top contributing heads
     contribution_subset = avg_contribution[layer_start:layer_end, :]

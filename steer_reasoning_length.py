@@ -52,28 +52,28 @@ def parse_args():
         "--model", type=str, default="Qwen/Qwen3-0.6B", help="Model name or path"
     )
     parser.add_argument(
-        "--directions_dir",
+        "--directions-dir",
         type=str,
         default="directions",
         help="Directory with saved direction vectors",
     )
     parser.add_argument(
-        "--directions_file",
+        "--directions-file",
         type=str,
         default=None,
         help="Direct path to directions file (overrides directions_dir and auto-naming)",
     )
     parser.add_argument(
-        "--output_dir",
+        "--output-dir",
         type=str,
         default="steering_results",
         help="Directory to save steering results",
     )
     parser.add_argument(
-        "--num_samples", type=int, default=10, help="Number of samples to evaluate"
+        "--num-samples", type=int, default=10, help="Number of samples to evaluate"
     )
     parser.add_argument(
-        "--direction_weights",
+        "--direction-weights",
         nargs="+",
         type=float,
         default=[-0.08, 0, 0.08],
@@ -87,7 +87,7 @@ def parse_args():
         help="Which component to steer (attention, MLP, or both)",
     )
     parser.add_argument(
-        "--max_new_tokens",
+        "--max-new-tokens",
         type=int,
         default=32768,
         help="Maximum number of tokens to generate",
@@ -99,30 +99,30 @@ def parse_args():
         help="Temperature for sampling",
     )
     parser.add_argument(
-        "--top_p",
+        "--top-p",
         type=float,
         default=0.95,
         help="Top-p (nucleus) sampling parameter",
     )
     parser.add_argument(
-        "--top_k",
+        "--top-k",
         type=float,
         default=20,
         help="Top-k sampling parameter",
     )
     parser.add_argument(
-        "--batch_size",
+        "--batch-size",
         type=int,
         default=4,
         help="Batch size for processing multiple examples simultaneously",
     )
     parser.add_argument(
-        "--use_efficient_mode",
+        "--use-efficient-mode",
         action="store_true",
         help="Use efficient batch processing mode for faster evaluation",
     )
     parser.add_argument(
-        "--low_memory_mode",
+        "--low-memory-mode",
         action="store_true",
         help="Enable low memory optimizations (smaller batch sizes, more frequent cleanup)",
     )
@@ -143,12 +143,12 @@ def parse_args():
         help="Resume from existing intermediate results if available",
     )
     parser.add_argument(
-        "--no_resume",
+        "--no-resume",
         action="store_true",
         help="Start fresh, ignoring any existing intermediate results",
     )
     parser.add_argument(
-        "--checkpoint_frequency",
+        "--checkpoint-frequency",
         type=int,
         default=10,
         help="Save intermediate results every N batches (default: 10)",
@@ -659,7 +659,7 @@ def test_visualization():
 # For efficiency and fault tolerance, we implement batch processing with frequent checkpointing.
 #
 # **Checkpointing Strategy:**
-# - Save intermediate results every N batches (configurable via `--checkpoint_frequency`)
+# - Save intermediate results every N batches (configurable via `--checkpoint-frequency`)
 # - Resume from partial completion of alpha values
 # - Save after errors to preserve progress
 # - Clean up intermediate files only after successful completion

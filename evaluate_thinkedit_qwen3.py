@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-Evaluate ThinkEdit Qwen3 models against original models.
-
-This script compares the performance of original and ThinkEdit-modified Qwen3 models
-on reasoning tasks, measuring both accuracy and thinking length.
+Evaluate and compare ThinkEdit models against original Qwen3 models.
 
 Usage:
-    python evaluate_thinkedit_qwen3.py --original_model Qwen/Qwen3-0.6B --edited_model thinkedit_models/ThinkEdit-Qwen_Qwen3_0.6B
+    python evaluate_thinkedit_qwen3.py --original-model Qwen/Qwen3-0.6B --edited-model thinkedit_models/ThinkEdit-Qwen_Qwen3_0.6B
 """
 
 import os
@@ -28,13 +25,13 @@ import re
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate ThinkEdit Qwen3 models")
     parser.add_argument(
-        "--original_model",
+        "--original-model",
         type=str,
         default="Qwen/Qwen3-0.6B",
         help="Original model name or path",
     )
     parser.add_argument(
-        "--edited_model",
+        "--edited-model",
         type=str,
         default=None,
         help="Edited model path (auto-detected if not provided)",
@@ -47,10 +44,10 @@ def parse_args():
         help="Dataset to evaluate on",
     )
     parser.add_argument(
-        "--num_samples", type=int, default=100, help="Number of samples to evaluate"
+        "--num-samples", type=int, default=100, help="Number of samples to evaluate"
     )
     parser.add_argument(
-        "--max_new_tokens",
+        "--max-new-tokens",
         type=int,
         default=32768,
         help="Maximum number of new tokens to generate",
@@ -58,25 +55,25 @@ def parse_args():
     parser.add_argument(
         "--temperature", type=float, default=0.6, help="Temperature for sampling"
     )
-    parser.add_argument("--top_p", type=float, default=0.95, help="Top-p for sampling")
-    parser.add_argument("--top_k", type=int, default=20, help="Top-k for sampling")
+    parser.add_argument("--top-p", type=float, default=0.95, help="Top-p for sampling")
+    parser.add_argument("--top-k", type=int, default=20, help="Top-k for sampling")
     parser.add_argument(
-        "--batch_size", type=int, default=1, help="Batch size for evaluation"
+        "--batch-size", type=int, default=1, help="Batch size for evaluation"
     )
     parser.add_argument(
-        "--output_dir",
+        "--output-dir",
         type=str,
         default="thinkedit_evaluation",
         help="Directory to save evaluation results",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
-        "--use_sglang",
+        "--use-sglang",
         action="store_true",
         help="Use SGLang server for evaluation (faster)",
     )
     parser.add_argument(
-        "--sglang_port", type=int, default=30000, help="SGLang server port"
+        "--sglang-port", type=int, default=30000, help="SGLang server port"
     )
     return parser.parse_args()
 

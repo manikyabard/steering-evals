@@ -7,7 +7,7 @@ to mitigate overly short reasoning in Qwen3 models.
 
 Usage:
     python get_thinkedit_qwen3_models.py --model Qwen/Qwen3-0.6B
-    python get_thinkedit_qwen3_models.py --model Qwen/Qwen3-0.6B --directions_file custom_directions.pt
+    python get_thinkedit_qwen3_models.py --model Qwen/Qwen3-0.6B --directions-file custom_directions.pt
 
 Prerequisites:
     1. Run find_short_thinking_attn_heads_qwen3.py to identify target heads
@@ -29,52 +29,52 @@ def parse_args():
         "--model", type=str, default="Qwen/Qwen3-0.6B", help="Model name or path"
     )
     parser.add_argument(
-        "--intervention_weight",
+        "--intervention-weight",
         type=float,
         default=1.0,
         help="Intervention strength (higher = stronger editing)",
     )
     parser.add_argument(
-        "--analysis_dir",
+        "--analysis-dir",
         type=str,
         default="thinkedit_analysis",
         help="Directory containing head analysis results",
     )
     parser.add_argument(
-        "--directions_file",
+        "--directions-file",
         type=str,
         default=None,
         help="Path to thinking length directions file (auto-detected from model name if not provided)",
     )
     parser.add_argument(
-        "--output_dir",
+        "--output-dir",
         type=str,
         default="thinkedit_models",
         help="Directory to save edited models",
     )
     parser.add_argument(
-        "--top_k_heads",
+        "--top-k-heads",
         type=int,
         default=None,
         help="Number of top heads to edit (default: use all identified heads)",
     )
     parser.add_argument(
-        "--manual_heads",
+        "--manual-heads",
         type=str,
         default=None,
         help="Manually specify heads as comma-separated pairs: 'layer1,head1;layer2,head2'",
     )
     parser.add_argument(
-        "--save_local",
+        "--save-local",
         action="store_true",
         default=True,
         help="Save model locally (default: True)",
     )
     parser.add_argument(
-        "--push_to_hub", action="store_true", help="Push model to HuggingFace Hub"
+        "--push-to-hub", action="store_true", help="Push model to HuggingFace Hub"
     )
     parser.add_argument(
-        "--hub_model_name",
+        "--hub-model-name",
         type=str,
         default=None,
         help="Model name for HuggingFace Hub (auto-generated if not provided)",
@@ -217,7 +217,7 @@ def main():
         else:
             logger.info(
                 "Please run extract_reasoning_length_direction_improved.py first, "
-                "or specify a custom directions file with --directions_file"
+                "or specify a custom directions file with --directions-file"
             )
         return
 

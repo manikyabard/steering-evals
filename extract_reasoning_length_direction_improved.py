@@ -49,96 +49,98 @@ from logging_setup import setup_logging, get_logger
 # %% Command line argument parsing
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Extract reasoning length direction from model (improved version)"
+        description="Extract reasoning length steering directions with improved memory efficiency"
     )
     parser.add_argument(
         "--model", type=str, default="Qwen/Qwen3-0.6B", help="Model name or path"
     )
     parser.add_argument(
-        "--responses_file",
+        "--responses-file",
         type=str,
-        default="responses/Qwen3-0.6B_gsm8k_responses.json",
-        help="Path to the responses JSON file",
+        required=True,
+        help="Path to model responses JSON file",
     )
     parser.add_argument(
-        "--output_dir",
+        "--output-dir",
         type=str,
         default="directions",
-        help="Directory to save extracted directions",
+        help="Directory to save direction vectors",
     )
     parser.add_argument(
-        "--component",
-        type=str,
-        default="attn",
-        choices=["attn", "mlp", "both"],
-        help="Which component to extract directions for",
+        "--components",
+        nargs="+",
+        choices=["attn", "mlp"],
+        default=["attn"],
+        help="Components to extract directions for",
     )
     parser.add_argument(
-        "--n_short",
+        "--n-short",
         type=int,
         default=None,
-        help="Number of short thinking examples to use (default: None = use all available)",
+        help="Number of short examples (auto-determined if not provided)",
     )
     parser.add_argument(
-        "--n_long",
+        "--n-long",
         type=int,
         default=None,
-        help="Number of long thinking examples to use (default: None = use all available)",
+        help="Number of long examples (auto-determined if not provided)",
     )
     parser.add_argument(
         "--device",
         type=str,
-        default=(
-            "cuda:0"
-            if torch.cuda.is_available()
-            else "mps" if torch.backends.mps.is_available() else "cpu"
-        ),
+        default="cuda:0" if torch.cuda.is_available() else "cpu",
         help="Device to use for computation",
     )
     parser.add_argument(
-        "--recompute_lengths",
-        action="store_true",
-        help="Recompute thinking lengths (useful if not already computed)",
+        "--batch-size", type=int, default=16, help="Batch size for processing"
     )
     parser.add_argument(
-        "--use_percentiles",
-        action="store_true",
-        help="Use percentile-based selection instead of fixed thresholds",
+        "--subset-size", type=int, default=None, help="Use subset of data for testing"
     )
     parser.add_argument(
-        "--short_percentile",
+        "--recompute-lengths",
+        action="store_true",
+        help="Recompute thinking lengths instead of using cached values",
+    )
+    parser.add_argument(
+        "--use-percentiles",
+        action="store_true",
+        help="Use percentile-based selection instead of fixed counts",
+    )
+    parser.add_argument(
+        "--short-percentile",
         type=float,
-        default=20.0,
-        help="Percentile threshold for short thinking examples (bottom X%%, default: 20.0)",
+        default=10.0,
+        help="Percentile threshold for short examples",
     )
     parser.add_argument(
-        "--long_percentile",
+        "--long-percentile",
         type=float,
-        default=20.0,
-        help="Percentile threshold for long thinking examples (top X%%, default: 20.0)",
+        default=90.0,
+        help="Percentile threshold for long examples",
     )
     parser.add_argument(
-        "--short_threshold",
+        "--short-threshold",
         type=int,
-        default=100,
-        help="Fixed threshold for short thinking examples (< X tokens, default: 100)",
+        default=None,
+        help="Explicit threshold for short thinking length",
     )
     parser.add_argument(
-        "--long_threshold",
+        "--long-threshold",
         type=int,
-        default=1000,
-        help="Fixed threshold for long thinking examples (> X tokens, default: 1000)",
+        default=None,
+        help="Explicit threshold for long thinking length",
     )
     parser.add_argument(
-        "--memory_cleanup_frequency",
+        "--memory-cleanup-frequency",
         type=int,
-        default=5,
-        help="How often to clear CUDA cache during processing (default: every 5 examples)",
+        default=50,
+        help="Frequency of memory cleanup (every N batches)",
     )
     parser.add_argument(
-        "--use_gradient_checkpointing",
+        "--use-gradient-checkpointing",
         action="store_true",
-        help="Enable gradient checkpointing to save memory (slower but uses less memory)",
+        help="Use gradient checkpointing to save memory",
     )
     return parser.parse_args()
 
@@ -873,7 +875,7 @@ def main():
     logger.info("IMPROVED REASONING LENGTH DIRECTION EXTRACTION")
     logger.info("=" * 60)
     logger.info(f"Model: {args.model}")
-    logger.info(f"Component: {args.component}")
+    logger.info(f"Components: {', '.join(args.components)}")
     logger.info(
         f"Short examples: {args.n_short if args.n_short is not None else 'ALL (ThinkEdit style)'}"
     )
@@ -926,10 +928,8 @@ def main():
         args.long_threshold,
     )
 
-    if args.component == "both":
-        components = ["attn", "mlp"]
-    else:
-        components = [args.component]
+    # Use the components directly from args
+    components = args.components
 
     for comp in components:
         logger.info(f"\n{'='*40}")
