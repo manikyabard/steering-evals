@@ -116,7 +116,7 @@ def parse_args():
     parser.add_argument(
         "--long-percentile",
         type=float,
-        default=90.0,
+        default=10.0,
         help="Percentile threshold for long examples",
     )
     parser.add_argument(
