@@ -93,3 +93,5 @@ All scripts are written with `#%%` cell markers and markdown sections, so they c
 ## Acknowledgements
 
 This implementation is based on the methodology described in the paper "ThinkEdit: Interpretable Weight Editing to Mitigate Overly Short Thinking in Reasoning Models" by Chung-En Sun, Ge Yan, and Tsui-Wei Weng.
+
+IPHR evaluation is based on the methodology described in the paper "Chain-of-Thought Reasoning In The Wild Is Not Always Faithful" by Iván Arcuschin, Jett Janiak, Robert Krzyzanowski, et al.
