@@ -1,56 +1,62 @@
+#!/usr/bin/env python3
 """
-Logging setup utility using loguru for steering-evals project.
-Configures logging to both terminal and timestamped log files.
+Simple logging setup utility for IPHR evaluation scripts.
 """
 
-import os
+import logging
 import sys
-from datetime import datetime
-from loguru import logger
+from typing import Optional
 
-
-def setup_logging(script_name: str, log_level: str = "INFO") -> None:
+def setup_logging(
+    name: str,
+    level: int = logging.INFO,
+    format_string: Optional[str] = None
+) -> logging.Logger:
     """
-    Set up logging for a script using loguru.
-
+    Set up logging for the application.
+    
     Args:
-        script_name: Name of the script (used for log file naming)
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
+        name: Logger name (usually script name)
+        level: Logging level (default: INFO)
+        format_string: Custom format string (optional)
+    
+    Returns:
+        Configured logger instance
     """
-    # Remove default handler
-    logger.remove()
-
-    # Create logs directory if it doesn't exist
-    log_dir = "logs"
-    os.makedirs(log_dir, exist_ok=True)
-
-    # Generate timestamp for log file
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"{script_name}_{timestamp}.log")
-
-    # Add terminal handler with colored output
-    logger.add(
-        sys.stderr,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        level=log_level,
-        colorize=True,
-    )
-
-    # Add file handler with detailed format
-    logger.add(
-        log_file,
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-        level=log_level,
-        rotation="100 MB",
-        retention="1 week",
-    )
-
-    logger.info(f"Logging initialized for {script_name}")
-    logger.info(f"Log file: {log_file}")
-
+    if format_string is None:
+        format_string = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    
+    # Create logger
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    
+    # Remove existing handlers to avoid duplicates
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # Create console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    
+    # Create formatter
+    formatter = logging.Formatter(format_string)
+    console_handler.setFormatter(formatter)
+    
+    # Add handler to logger
+    logger.addHandler(console_handler)
+    
     return logger
 
-
-def get_logger():
-    """Get the configured logger instance."""
-    return logger
+def get_logger(name: Optional[str] = None) -> logging.Logger:
+    """
+    Get a logger instance.
+    
+    Args:
+        name: Logger name (if None, uses root logger)
+    
+    Returns:
+        Logger instance
+    """
+    if name is None:
+        return logging.getLogger()
+    return logging.getLogger(name)

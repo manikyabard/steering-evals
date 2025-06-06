@@ -1,68 +1,47 @@
 #!/usr/bin/env python3
 """
-Generate responses from GSM8K dataset using SGLang.
+GSM8K Response Generation Script
 
-This script generates and saves model responses from the GSM8K dataset
-with thinking enabled to create datasets for identifying reasoning length direction.
+Generates model responses from the GSM8K mathematical reasoning dataset using SGLang
+for efficient parallel inference. This script creates datasets needed for reasoning
+length direction extraction and steering experiments.
 
-Prerequisites:
-Start the SGLang server in another terminal:
-```bash
-python -m sglang.launch_server \
-    --model-path Qwen/Qwen3-0.6B \
-    --port 30000 \
-    --reasoning-parser qwen3
-```
+Usage:
+    1. Start SGLang server: python -m sglang.launch_server --model-path MODEL --reasoning-parser qwen3
+    2. Run generation: python generate_responses_gsm8k.py --model MODEL --num_samples N
 
-Resume Options:
-- Use --resume-from-id N to resume from a specific example ID
-- Use --responses-file path/to/file.json to specify a particular response file 
-  (useful if the file was renamed or moved)
-- Use --force-resume with --resume-from-id to start from a specific ID even if 
-  no existing file is found
+The script supports resumption from checkpoints and handles errors gracefully during
+long generation runs. Generated responses include both the model's thinking process
+and final answers, which are later used for direction extraction.
+
+Authors: Tino Trangia, Teresa Lee, Derrick Yao, Manikya Bardhan
+Institution: UC San Diego
 """
 
-# %% [markdown]
-# # Generate Responses from GSM8K Dataset
-#
-# This notebook demonstrates how to generate model responses from the GSM8K math dataset
-# with thinking enabled. We'll walk through the process step by step, from setting up
-# the SGLang server connection to processing responses in parallel.
-#
-# ## Overview
-# The process involves:
-# 1. Setting up connection to SGLang server
-# 2. Loading the GSM8K dataset
-# 3. Generating responses with thinking enabled
-# 4. Processing responses in parallel batches
-# 5. Saving results for later analysis
-
-# %% Setup and imports
+# Standard library imports
 import os
 import json
-import torch
 import argparse
 import requests
 import concurrent.futures
 import re
+
+# Third-party imports
+import torch
 import numpy as np
 from tqdm import tqdm
 from datasets import load_dataset
 from transformers import AutoTokenizer
 import sglang as sgl
+
+# Local imports - will need to update these paths
+import sys
+sys.path.append('../..')  # Adjust based on new structure
 from logging_setup import setup_logging, get_logger
 
-# GSM8K answer parsing patterns
+# Constants for GSM8K answer extraction
 ANS_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
 INVALID_ANS = "[invalid]"
-
-# %% [markdown]
-# ## Configuration and Arguments
-#
-# First, let's set up the configuration parameters for our generation process.
-
-
-# %% Command line argument parsing
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate GSM8K responses")
     parser.add_argument(
@@ -133,9 +112,19 @@ def parse_args():
     return parser.parse_args()
 
 
-# %% Answer parsing functions
 def extract_answer_hf(completion):
-    """Extract answer using GSM8K format (#### answer)."""
+    """
+    Extract numerical answer from completion using GSM8K's standard format.
+    
+    GSM8K answers are marked with "#### " followed by the numerical answer.
+    This function searches for this pattern and extracts the number.
+    
+    Args:
+        completion (str): Model's complete response text
+        
+    Returns:
+        float/int: Extracted numerical answer, or INVALID_ANS if not found
+    """
     match = ANS_RE.search(completion)
     if match:
         match_str = match.group(1).strip()
@@ -149,19 +138,30 @@ def extract_answer_hf(completion):
 
 
 def extract_answer_fallback(completion):
-    """Fallback: extract last number from completion."""
+    """
+    Fallback answer extraction when standard GSM8K format isn't found.
+    
+    Tries multiple strategies:
+    1. Look for LaTeX boxed answers (\\boxed{answer})
+    2. Extract the last numerical value in the text
+    
+    Args:
+        completion (str): Model's complete response text
+        
+    Returns:
+        float/int: Extracted numerical answer, or INVALID_ANS if not found
+    """
     try:
-        # Look for boxed answer first
+        # Check for LaTeX boxed answers first
         boxed_pattern = r'\\boxed\{([^}]*)\}'
         match = re.search(boxed_pattern, completion)
         if match:
             boxed_content = match.group(1).strip()
-            # Try to extract number from boxed content
             numbers = re.findall(r"-?\d+(?:\.\d+)?", boxed_content)
             if numbers:
                 return eval(numbers[-1])
         
-        # Fallback to last number in text
+        # Fall back to extracting last number in text
         numbers = re.findall(r"-?\d+(?:\.\d+)?", completion)
         if numbers:
             return eval(numbers[-1])
@@ -171,29 +171,51 @@ def extract_answer_fallback(completion):
 
 
 def extract_answer(completion):
-    """Extract answer from completion using multiple strategies."""
-    # Try GSM8K format first
+    """
+    Extract numerical answer using multiple extraction strategies.
+    
+    Combines standard GSM8K format extraction with fallback methods
+    to maximize answer recovery rate from model completions.
+    
+    Args:
+        completion (str): Model's complete response text
+        
+    Returns:
+        float/int: Extracted numerical answer, or INVALID_ANS if not found
+    """
+    # Try standard GSM8K format first
     answer = extract_answer_hf(completion)
     if answer != INVALID_ANS:
         return answer
     
-    # Try fallback method
+    # Use fallback extraction if standard format fails
     return extract_answer_fallback(completion)
 
 
 def is_correct(completion, ground_truth_answer):
-    """Check if completion answer matches ground truth."""
+    """
+    Check if the model's answer matches the ground truth.
+    
+    Extracts answers from both the model completion and ground truth,
+    then compares them for exact numerical equality.
+    
+    Args:
+        completion (str): Model's complete response
+        ground_truth_answer (str): Correct answer from dataset
+        
+    Returns:
+        bool: True if answers match, False otherwise
+    """
     try:
-        # Extract ground truth
+        # Extract ground truth answer
         gold = extract_answer_hf(ground_truth_answer)
         if gold == INVALID_ANS:
-            # Try to extract from ground truth using fallback
             gold = extract_answer_fallback(ground_truth_answer)
         
         if gold == INVALID_ANS:
             return False
         
-        # Extract predicted answer
+        # Extract model's predicted answer
         predicted = extract_answer(completion)
         
         if predicted == INVALID_ANS:

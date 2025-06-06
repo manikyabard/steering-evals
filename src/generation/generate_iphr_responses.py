@@ -493,7 +493,18 @@ def main(args):
     
     # Load tokenizer and connect to server
     logger.info(f"Loading tokenizer for {args.model}...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    
+    # Check if the model path is a local directory
+    if os.path.exists(args.model) and os.path.isdir(args.model):
+        # Local model path - use local_files_only to avoid hub validation
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model, 
+            local_files_only=True, 
+            trust_remote_code=True
+        )
+    else:
+        # Remote model - use normal loading
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
     
     server_url = connect_to_sglang(args.server_url)
     

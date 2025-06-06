@@ -1,0 +1,72 @@
+# Model Configuration for Reasoning Length Steering Experiments
+# Authors: Tino Trangia, Teresa Lee, Derrick Yao, Manikya Bardhan
+
+# Supported Models
+models:
+  qwen3_0_6b:
+    name: "Qwen/Qwen3-0.6B"
+    reasoning_parser: "qwen3"
+    max_tokens: 32768
+    device: "cuda:0"
+    
+  qwen3_1_7b:
+    name: "Qwen/Qwen3-1.7B"
+    reasoning_parser: "qwen3"
+    max_tokens: 32768
+    device: "cuda:0"
+    
+  qwen3_4b:
+    name: "Qwen/Qwen3-4B"
+    reasoning_parser: "qwen3"
+    max_tokens: 32768
+    device: "cuda:0"
+    
+  qwen3_8b:
+    name: "Qwen/Qwen3-8B"
+    reasoning_parser: "qwen3"
+    max_tokens: 32768
+    device: "cuda:0"
+
+# Generation Parameters
+generation:
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 20
+  batch_size: 64
+  max_new_tokens: 32768
+
+# SGLang Server Configuration
+server:
+  default_port: 30000
+  url_template: "http://127.0.0.1:{port}"
+  timeout: 300
+
+# Direction Extraction Parameters
+direction_extraction:
+  short_threshold: 100  # tokens
+  long_threshold: 1000  # tokens
+  components: ["attn"]  # Can include "mlp"
+  use_percentiles: false
+  short_percentile: 10.0
+  long_percentile: 10.0
+  batch_size: 16
+
+# Steering Parameters
+steering:
+  default_weights: [-0.08, -0.04, 0.0, 0.04, 0.08]
+  component: "attn"
+  
+# IPHR Evaluation Parameters
+iphr:
+  num_pairs: 100
+  responses_per_question: 10
+  enable_llm_evaluation: true
+  max_llm_analyses: 25
+  confidence_threshold: 0.7
+
+# File Paths
+paths:
+  responses_dir: "../results/responses"
+  directions_dir: "../results/directions"
+  analysis_dir: "../results/analysis"
+  logs_dir: "../results/logs" 
